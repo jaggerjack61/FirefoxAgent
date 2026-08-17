@@ -100,6 +100,9 @@ describe("ToolRegistry", () => {
               tag: "a",
               href: "https://example.test/docs",
               visible: true,
+              enabled: true,
+              clickable: true,
+              actionable: true,
               inFrame: false,
               frameId: 0,
             },
@@ -109,6 +112,9 @@ describe("ToolRegistry", () => {
               name: "Open menu",
               tag: "div",
               visible: true,
+              enabled: true,
+              clickable: true,
+              actionable: true,
               inFrame: false,
               frameId: 0,
             },
@@ -135,6 +141,30 @@ describe("ToolRegistry", () => {
       expect.objectContaining({ id: "E1", role: "link", name: "Documentation", tag: "a", href: "https://example.test/docs" }),
       expect.objectContaining({ id: "E2", role: "button", name: "Open menu", tag: "div" }),
     ]);
+  });
+
+  it("surfaces an unverified click as a tool failure", async () => {
+    const gateway = new FakeGateway({
+      tabs: [{ id: 1, title: "Example", url: "https://example.test" }],
+      pages: {},
+    });
+    gateway.clickElement = async (tabId, elementId) => ({
+      success: false,
+      tabId,
+      observation: `Click ${elementId} was not verified.`,
+      error: {
+        code: "ACTION_NOT_VERIFIED",
+        message: "The page ignored the synthetic click.",
+        suggestedAction: "Click it manually.",
+      },
+      pageChanged: false,
+      newElements: [],
+      url: "https://example.test",
+      title: "Example",
+    });
+
+    await expect(createToolRegistry().executeCall("click_element", { elementId: "E3" }, { ...context, gateway }))
+      .rejects.toMatchObject({ code: "ACTION_NOT_VERIFIED", suggestedAction: "Click it manually." });
   });
 
   it("returns wired action history instead of an empty placeholder", async () => {

@@ -13,6 +13,7 @@ export interface ElementIdentityInput {
   tag: string;
   role: string;
   name: string;
+  domId?: string;
   href?: string;
   type?: string;
   value?: string;
@@ -25,7 +26,7 @@ export function elementIdentityHash(input: ElementIdentityInput): string {
     // Values and checked state are mutable interaction state, not identity.
     // Including them makes a stable id go stale immediately after a fill or
     // checkbox click, which defeats locator-style reuse.
-    [input.tag, input.role, input.name.toLowerCase(), input.href ?? "", input.type ?? ""].join("|"),
+    [input.tag, input.role, input.name.toLowerCase(), input.domId ?? "", input.href ?? "", input.type ?? ""].join("|"),
   );
 }
 
@@ -35,6 +36,7 @@ export function identityOfElement(el: InteractiveElement): ElementIdentityInput 
     tag: el.tag,
     role: el.role,
     name: el.name,
+    domId: el.domId,
     href: el.href,
     type: el.type,
     value: el.value,
@@ -51,6 +53,7 @@ export interface MatchCandidate {
   role: string;
   name: string;
   tag: string;
+  domId?: string;
   type?: string;
   href?: string;
 }
@@ -68,8 +71,11 @@ const normalize = (s: string): string => s.trim().toLowerCase().replace(/\s+/g, 
  * Returns a 0..1 score; >0.6 is a confident match.
  */
 export function matchScore(candidate: MatchCandidate, target: MatchCandidate): number {
-  if (candidate.role !== target.role) return 0;
+  const sameDomId = Boolean(candidate.domId && target.domId && candidate.domId === target.domId);
+  if (candidate.role !== target.role && !sameDomId) return 0;
   let score = 0.25; // role matches
+
+  if (sameDomId) score += 0.5;
 
   const cName = normalize(candidate.name);
   const tName = normalize(target.name);

@@ -440,15 +440,16 @@ export class FirefoxGateway implements BrowserGateway {
     tabId: number,
     elementId: string,
     build: (frameId: number, localId: string) => ContentRequest,
-    opts: { settleAfterAction?: boolean } = {},
+    opts: { settleAfterAction?: boolean; preferActionableClickTarget?: boolean } = {},
   ): Promise<InteractionResult> {
     const before = await this.getTab(tabId);
     const oldDescriptor = this.cachedElementDescriptor(tabId, elementId);
     const { frameId, localId } = splitElementId(elementId);
     let resp = await this.sendToFrame(tabId, frameId, build(frameId, localId));
-    if (!resp.ok && resp.error === "ELEMENT_NOT_FOUND") {
-      // 1) refresh snapshot  2) semantic match  3) retry once
-      const remapped = await this.refreshAndRemap(tabId, oldDescriptor);
+    if (!resp.ok && (resp.error === "ELEMENT_NOT_FOUND" || resp.error === "ELEMENT_NOT_INTERACTABLE")) {
+      // Refresh and semantically remap once. This handles both replaced DOM
+      // nodes and pages with a hidden/covered duplicate of the same control.
+      const remapped = await this.refreshAndRemap(tabId, oldDescriptor, opts.preferActionableClickTarget ?? false);
       if (remapped) {
         resp = await this.sendToFrame(tabId, remapped.frameId, build(remapped.frameId, remapped.localId));
         if (resp.ok) elementId = remapped.elementId;
@@ -464,18 +465,22 @@ export class FirefoxGateway implements BrowserGateway {
   private async refreshAndRemap(
     tabId: number,
     old: MatchCandidate | null,
+    preferActionableClickTarget = false,
   ): Promise<{ elementId: string; frameId: number; localId: string } | null> {
     if (!old) return null;
     this.invalidate(tabId);
     const fresh = await this.getSnapshot(tabId, { maxElements: 120, includeValues: false });
-    const candidates: MatchCandidate[] = fresh.elements.map((e) => ({
-      id: e.id,
-      role: e.role,
-      name: e.name,
-      tag: e.tag,
-      type: e.type,
-      href: e.href,
-    }));
+    const candidates: MatchCandidate[] = fresh.elements
+      .filter((e) => !preferActionableClickTarget || e.actionable !== false)
+      .map((e) => ({
+        id: e.id,
+        role: e.role,
+        name: e.name,
+        tag: e.tag,
+        domId: e.domId,
+        type: e.type,
+        href: e.href,
+      }));
     const match = findBestSemanticMatch(old, candidates);
     if (!match.id) return null;
     const { frameId, localId } = splitElementId(match.id);
@@ -496,7 +501,7 @@ export class FirefoxGateway implements BrowserGateway {
     const el = elements.find((e) => e.id === elementId);
     if (!el) return null;
     const ident = identityOfElement(el);
-    return { id: el.id, role: ident.role, name: ident.name, tag: ident.tag, type: ident.type, href: ident.href };
+    return { id: el.id, role: ident.role, name: ident.name, tag: ident.tag, domId: ident.domId, type: ident.type, href: ident.href };
   }
 
   private async buildInteractionResult(
@@ -524,10 +529,17 @@ export class FirefoxGateway implements BrowserGateway {
     meta = await this.getTab(tabId);
     const action = String(data.action ?? "action");
     const pageChanged = navigationObserved || (!!before && !!meta && before.url !== meta.url);
+    const effectObserved = data.effectObserved;
+    const clickWasUnverified = action === "click" && effectObserved === false && !pageChanged;
     const documentLoading = meta?.status === "loading";
     const networkIdle = meta?.ready ?? !documentLoading;
     const observation = [
-      `${capitalize(action)} successful.`,
+      clickWasUnverified
+        ? "Click was dispatched, but no resulting page or control-state change could be verified."
+        : `${capitalize(action)} successful.`,
+      clickWasUnverified
+        ? "The site may reject synthetic WebExtension input (isTrusted=false), or the selected element may not be the real control."
+        : "",
       pageChanged ? "The page changed after the action." : "",
       documentLoading ? "The document is still loading. Further page actions will wait for it." : "",
       !documentLoading && !networkIdle ? "Background page API activity is continuing; the bounded wait elapsed, so the completed document remains usable." : "",
@@ -537,8 +549,15 @@ export class FirefoxGateway implements BrowserGateway {
       .filter(Boolean)
       .join("\n");
     return {
-      success: true,
+      success: !clickWasUnverified,
       observation,
+      ...(clickWasUnverified ? {
+        error: {
+          code: "ACTION_NOT_VERIFIED" as const,
+          message: "The click was dispatched but produced no verifiable page effect.",
+          suggestedAction: "Refresh the page snapshot and choose a currently actionable native or ARIA control. If the site requires trusted input, click it manually.",
+        },
+      } : {}),
       pageChanged,
       networkIdle,
       newElements,
@@ -549,7 +568,10 @@ export class FirefoxGateway implements BrowserGateway {
   }
 
   clickElement(tabId: number, elementId: string): Promise<InteractionResult> {
-    return this.interact(tabId, elementId, (_f, localId) => ({ kind: "click", elementId: localId }), { settleAfterAction: true });
+    return this.interact(tabId, elementId, (_f, localId) => ({ kind: "click", elementId: localId }), {
+      settleAfterAction: true,
+      preferActionableClickTarget: true,
+    });
   }
 
   typeText(tabId: number, elementId: string, text: string): Promise<InteractionResult> {

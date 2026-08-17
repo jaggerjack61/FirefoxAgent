@@ -209,4 +209,54 @@ describe("FirefoxGateway snapshots and recovery", () => {
     expect(result.success).toBe(true);
     expect(clickIds).toEqual(["E1", "E7"]);
   });
+
+  it("remaps a covered target to an actionable semantic duplicate", async () => {
+    let snapshotNumber = 0;
+    const clickIds: string[] = [];
+    installContentBrowserMock((request) => {
+      if (request.kind === "get_snapshot") {
+        snapshotNumber += 1;
+        return {
+          ok: true,
+          data: page(snapshotNumber === 1
+            ? [{ id: "E1", role: "button", name: "Continue", tag: "button", visible: true, actionable: true, inFrame: false, frameId: 0 }]
+            : [
+                { id: "E1", role: "button", name: "Continue", tag: "button", visible: true, actionable: false, inFrame: false, frameId: 0 },
+                { id: "E8", role: "button", name: "Continue", tag: "button", visible: true, actionable: true, inFrame: false, frameId: 0 },
+              ]),
+        };
+      }
+      if (request.kind === "click") {
+        clickIds.push(request.elementId);
+        return request.elementId === "E1"
+          ? { ok: false, error: "ELEMENT_NOT_INTERACTABLE", message: "covered" }
+          : { ok: true, data: { action: "click", effectObserved: true } };
+      }
+      return { ok: false, error: "NOT_IMPLEMENTED", message: "unexpected" };
+    });
+    const gateway = new FirefoxGateway();
+    await gateway.getSnapshot(1, { maxElements: 120 });
+
+    const result = await gateway.clickElement(1, "E1");
+
+    expect(result.success).toBe(true);
+    expect(clickIds).toEqual(["E1", "E8"]);
+  });
+
+  it("does not report success when a synthetic click has no verifiable effect", async () => {
+    installContentBrowserMock((request) => {
+      if (request.kind === "get_snapshot") return { ok: true, data: page() };
+      if (request.kind === "click") {
+        return { ok: true, data: { action: "click", effectObserved: false, trustedInput: false } };
+      }
+      return { ok: false, error: "NOT_IMPLEMENTED", message: "unexpected" };
+    });
+    const gateway = new FirefoxGateway();
+
+    const result = await gateway.clickElement(1, "E1");
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("ACTION_NOT_VERIFIED");
+    expect(result.observation).toContain("isTrusted=false");
+  });
 });

@@ -450,7 +450,16 @@ export class AgentRuntime {
         tabId: active.id,
         url: snap.url,
         title: snap.title,
-        elements: snap.elements.filter((e) => e.visible).map((e) => ({ id: e.id, role: e.role, name: e.name })),
+        elements: snap.elements
+          .filter((e) => e.visible && (e.clickable !== true || e.actionable !== false))
+          .map((e) => ({
+            id: e.id,
+            role: e.role,
+            name: e.name,
+            enabled: e.enabled,
+            clickable: e.clickable,
+            actionable: e.actionable,
+          })),
         text: snap.text,
         headings: snap.headings,
         networkIdle: snap.networkIdle,

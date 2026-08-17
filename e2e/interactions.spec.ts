@@ -60,6 +60,32 @@ async function snapshot(page: Page): Promise<PageSnapshot> {
   return response.ok ? response.data as PageSnapshot : Promise.reject(new Error(response.message));
 }
 
+test("snapshot advertises only real, currently actionable click targets", async ({ page }) => {
+  await installContentHarness(page, `
+    <button id="native">Native action</button>
+    <button id="disabled" disabled>Disabled action</button>
+    <button id="hidden" style="display:none">Hidden action</button>
+    <div id="focus-only" tabindex="0">Focusable region</div>
+    <div id="scripted" onclick="this.dataset.clicked = 'yes'">Scripted action</div>
+    <div id="delegating" onclick="void 0"><button>Nested action</button></div>
+    <div style="position:relative">
+      <button id="covered">Covered action</button>
+      <div style="position:absolute;inset:0;z-index:2"></div>
+    </div>
+  `);
+
+  const snap = await snapshot(page);
+  const byDomId = (id: string) => snap.elements.find((element) => element.domId === id);
+
+  expect(byDomId("native")).toMatchObject({ clickable: true, actionable: true, enabled: true });
+  expect(byDomId("disabled")).toMatchObject({ clickable: true, actionable: false, enabled: false });
+  expect(byDomId("hidden")).toMatchObject({ clickable: true, actionable: false, visible: false });
+  expect(byDomId("focus-only")).toBeUndefined();
+  expect(byDomId("scripted")).toMatchObject({ role: "button", clickable: true, actionable: true });
+  expect(byDomId("delegating")).toMatchObject({ clickable: false, actionable: false });
+  expect(byDomId("covered")).toMatchObject({ clickable: true, actionable: false });
+});
+
 test("click waits for a temporarily disabled control and emits a pointer sequence", async ({ page }) => {
   await installContentHarness(page, "<button id='continue' disabled>Continue</button>");
   const snap = await snapshot(page);
@@ -134,6 +160,29 @@ test("click scrolls an off-screen target into the viewport", async ({ page }) =>
 
   expect(response.ok).toBe(true);
   expect(await page.evaluate(() => (window as unknown as { __insideViewportAtClick?: boolean }).__insideViewportAtClick)).toBe(true);
+});
+
+test("click reports when a site ignores untrusted synthetic input", async ({ page }) => {
+  await installContentHarness(page, "<button id='trusted-only'>Trusted action</button>");
+  const snap = await snapshot(page);
+  const button = snap.elements.find((element) => element.domId === "trusted-only");
+  expect(button).toBeTruthy();
+
+  await page.evaluate(() => {
+    document.querySelector("#trusted-only")?.addEventListener("click", (event) => {
+      if (event.isTrusted) document.body.dataset.accepted = "yes";
+    });
+  });
+
+  const response = await send(page, { kind: "click", elementId: button!.id });
+
+  expect(response.ok).toBe(true);
+  expect(response.ok && response.data).toMatchObject({
+    action: "click",
+    effectObserved: false,
+    trustedInput: false,
+  });
+  expect(await page.getAttribute("body", "data-accepted")).toBeNull();
 });
 
 test("fill waits for editability and updates a controlled text field", async ({ page }) => {

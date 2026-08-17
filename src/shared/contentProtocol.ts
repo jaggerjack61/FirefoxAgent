@@ -20,6 +20,8 @@ export interface InteractiveElement {
   /** Accessible name (aria-label, associated label, visible text...). */
   name: string;
   tag: string;
+  /** Stable DOM id when the page supplies one; improves stale-element recovery. */
+  domId?: string;
   type?: string;
   value?: string;
   checked?: boolean;
@@ -27,6 +29,12 @@ export interface InteractiveElement {
   required?: boolean;
   /** True if the element has a nonzero bounding box. */
   visible: boolean;
+  /** False for native/ARIA disabled controls and controls inside inert ancestors. */
+  enabled?: boolean;
+  /** True only when click activation is semantically appropriate for this element. */
+  clickable?: boolean;
+  /** Snapshot-time best effort: clickable, visible, enabled and not currently covered. */
+  actionable?: boolean;
   /** True when the element sits inside an iframe. */
   inFrame: boolean;
   /** webNavigation frameId (0 = top frame). */

@@ -77,12 +77,20 @@ export class ElementRegistry {
 
   toInteractive(el: Element, frameId: number, includeValue: boolean): InteractiveElement {
     const role = inferRole(el);
+    const name = accessibleName(el);
+    const visible = isElementVisible(el);
+    const enabled = isElementEnabled(el);
+    const clickable = isClickTarget(el, name);
     const base: InteractiveElement = {
       id: el.getAttribute(EID_ATTR) ?? this.register(el),
       role,
-      name: accessibleName(el),
+      name,
       tag: el.tagName.toLowerCase(),
-      visible: isElementVisible(el),
+      domId: el.id || undefined,
+      visible,
+      enabled,
+      clickable,
+      actionable: clickable && visible && enabled && hasPotentialClickPoint(el),
       inFrame: frameId !== 0,
       frameId,
     };
@@ -152,14 +160,121 @@ export function hasJavaScriptClickBehavior(el: Element): boolean {
     || el.hasAttribute("onmousedown")
     || el.hasAttribute("onmouseup")
     || el.hasAttribute("onpointerdown")
-    || el.hasAttribute("onpointerup")
-    || (el.hasAttribute("tabindex") && html.tabIndex >= 0);
+    || el.hasAttribute("onpointerup");
 }
 
 function isElementVisible(el: Element): boolean {
   if (el.getAttribute("aria-hidden") === "true") return false;
   const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden") return false;
+  if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
   const rect = el.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
+}
+
+function isElementEnabled(el: Element): boolean {
+  try {
+    if (el.matches(":disabled")) return false;
+  } catch {
+    // Stateful selectors are not supported by every SVG/custom element.
+  }
+  return !el.closest("[aria-disabled='true'], [inert]");
+}
+
+const CLICK_ROLES = new Set([
+  "button",
+  "link",
+  "checkbox",
+  "radio",
+  "switch",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "tab",
+]);
+
+function isClickTarget(el: Element, name: string): boolean {
+  const rawClickable = isRawClickTarget(el);
+  if (!rawClickable) return false;
+  // Event-delegating containers often wrap the actual button/link and expose
+  // the same accessible name. Prefer the concrete descendant in that case.
+  if (!isNativeClickTarget(el) && hasEquivalentClickableDescendant(el, name)) return false;
+  return true;
+}
+
+function isRawClickTarget(el: Element): boolean {
+  if (isNativeClickTarget(el)) return true;
+  const role = (el.getAttribute("role") ?? "").toLowerCase();
+  return CLICK_ROLES.has(role) || hasJavaScriptClickBehavior(el);
+}
+
+function isNativeClickTarget(el: Element): boolean {
+  if (el instanceof HTMLAnchorElement) return Boolean(el.href);
+  if (el instanceof HTMLButtonElement) return true;
+  if (el.tagName === "SUMMARY") return true;
+  if (el instanceof HTMLInputElement) {
+    return ["button", "submit", "reset", "image", "checkbox", "radio"].includes(el.type);
+  }
+  return false;
+}
+
+function hasEquivalentClickableDescendant(el: Element, name: string): boolean {
+  const normalized = normalizeName(name);
+  if (!normalized) return false;
+  for (const child of el.querySelectorAll<Element>(
+    "button, a[href], input[type='button'], input[type='submit'], input[type='reset'], input[type='image'], input[type='checkbox'], input[type='radio'], summary, [role='button'], [role='link'], [role='checkbox'], [role='radio'], [role='switch'], [role='menuitem'], [role='tab']",
+  )) {
+    if (isRawClickTarget(child) && normalizeName(accessibleName(child)) === normalized) return true;
+  }
+  return false;
+}
+
+function normalizeName(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Rejects controls that are already covered or have pointer events disabled.
+ * Off-screen controls remain eligible because clickElement scrolls them first.
+ */
+function hasPotentialClickPoint(el: Element): boolean {
+  if (window.getComputedStyle(el).pointerEvents === "none") return false;
+  const rect = el.getBoundingClientRect();
+  const intersectsViewport = rect.right > 0
+    && rect.bottom > 0
+    && rect.left < window.innerWidth
+    && rect.top < window.innerHeight;
+  if (!intersectsViewport) return true;
+
+  const left = Math.max(0, rect.left);
+  const top = Math.max(0, rect.top);
+  const right = Math.min(window.innerWidth, rect.right);
+  const bottom = Math.min(window.innerHeight, rect.bottom);
+  if (right - left < 1 || bottom - top < 1) return false;
+  const insetX = Math.min(2, (right - left) / 4);
+  const insetY = Math.min(2, (bottom - top) / 4);
+  const points = [
+    [(left + right) / 2, (top + bottom) / 2],
+    [left + insetX, top + insetY],
+    [right - insetX, top + insetY],
+    [left + insetX, bottom - insetY],
+    [right - insetX, bottom - insetY],
+  ];
+  return points.some(([x, y]) => {
+    const hit = document.elementFromPoint(x, y);
+    return Boolean(hit && isComposedDescendant(hit, el));
+  });
+}
+
+function isComposedDescendant(candidate: Element, target: Element): boolean {
+  let current: Element | null = candidate;
+  while (current) {
+    if (current === target) return true;
+    if (current.parentElement) {
+      current = current.parentElement;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = typeof ShadowRoot !== "undefined" && root instanceof ShadowRoot ? root.host : null;
+  }
+  return false;
 }

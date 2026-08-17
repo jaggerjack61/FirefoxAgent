@@ -70,19 +70,86 @@ export async function clickElement(registry: ElementRegistry, localId: string): 
   if (failure || !actionable.ok) return failure ?? { error: elementNotFound(localId) };
 
   const target = describe(actionable.element);
+  const beforeState = clickEffectState(actionable.element);
+  let mutationObserved = false;
+  const observer = new MutationObserver(() => { mutationObserved = true; });
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    characterData: true,
+  });
   try {
     dispatchClickSequence(actionable.element, actionable.point!);
   } catch (err) {
+    observer.disconnect();
     return { error: { code: "INTERNAL_ERROR", message: err instanceof Error ? err.message : String(err) } };
   }
+  const effectObserved = await waitForClickEffect(actionable.element, beforeState, () => mutationObserved);
+  observer.disconnect();
   return {
     data: {
       action: "click",
       target,
       waitedMs: actionable.waitedMs,
+      effectObserved,
+      trustedInput: false,
+      verification: effectObserved
+        ? "A page or control state change was observed after the click."
+        : "No page or control state change was observed; the site may have ignored synthetic input.",
       page: { url: location.href, title: document.title },
     },
   };
+}
+
+function clickEffectState(element: Element): string {
+  const input = element instanceof HTMLInputElement ? {
+    checked: element.checked,
+    value: element.value,
+  } : undefined;
+  const details = element instanceof HTMLDetailsElement
+    ? element.open
+    : element.closest("details")?.open;
+  return JSON.stringify({
+    connected: element.isConnected,
+    url: location.href,
+    title: document.title,
+    name: accessibleName(element),
+    className: element.getAttribute("class"),
+    hidden: element.hasAttribute("hidden"),
+    ariaExpanded: element.getAttribute("aria-expanded"),
+    ariaPressed: element.getAttribute("aria-pressed"),
+    ariaSelected: element.getAttribute("aria-selected"),
+    input,
+    details,
+  });
+}
+
+async function waitForClickEffect(
+  element: Element,
+  beforeState: string,
+  mutationObserved: () => boolean,
+): Promise<boolean> {
+  const deadline = Date.now() + 350;
+  while (Date.now() < deadline) {
+    await nextInteractionFrame();
+    if (mutationObserved() || clickEffectState(element) !== beforeState) return true;
+  }
+  return mutationObserved() || clickEffectState(element) !== beforeState;
+}
+
+function nextInteractionFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(fallback);
+      resolve();
+    };
+    const fallback = window.setTimeout(done, 50);
+    window.requestAnimationFrame(done);
+  });
 }
 
 export function focusElement(registry: ElementRegistry, localId: string): InteractionOutcome {

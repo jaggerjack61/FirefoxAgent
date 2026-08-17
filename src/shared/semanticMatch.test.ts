@@ -13,6 +13,14 @@ describe("matchScore", () => {
     const partial = matchScore({ id: "E3", role: "link", name: "See Pricing", tag: "a" }, target);
     expect(exact).toBeGreaterThan(partial);
   });
+
+  it("recovers a replaced element by stable DOM id when its label changes", () => {
+    const changed = matchScore(
+      { id: "E9", role: "button", name: "Continue to payment", tag: "button", domId: "checkout-next" },
+      { id: "E2", role: "button", name: "Continue", tag: "button", domId: "checkout-next" },
+    );
+    expect(changed).toBeGreaterThanOrEqual(0.6);
+  });
 });
 
 describe("findBestSemanticMatch", () => {

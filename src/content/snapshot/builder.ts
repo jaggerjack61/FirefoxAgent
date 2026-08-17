@@ -32,7 +32,6 @@ const INTERACTIVE_SELECTOR = [
   "[onmouseup]",
   "[onpointerdown]",
   "[onpointerup]",
-  "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
 export interface SnapshotBuilderOptions {

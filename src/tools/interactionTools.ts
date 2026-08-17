@@ -30,6 +30,13 @@ export const clickElementTool = defineTool({
   async execute(input, ctx) {
     const tabId = await resolveTabId(ctx, input.tabId);
     const result = await ctx.gateway.clickElement(tabId, input.elementId);
+    if (!result.success) {
+      throw new ToolError(
+        result.error?.code ?? "ACTION_NOT_VERIFIED",
+        result.error?.message ?? result.observation,
+        { suggestedAction: result.error?.suggestedAction },
+      );
+    }
     return result;
   },
 });

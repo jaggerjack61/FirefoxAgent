@@ -126,7 +126,7 @@ export interface ActiveTabContextInput {
   url: string;
   title: string;
   /** Compact interactive elements, e.g. [{id:"E3",role:"link",name:"Pricing"}]. */
-  elements?: { id: string; role: string; name: string }[];
+  elements?: { id: string; role: string; name: string; enabled?: boolean; clickable?: boolean; actionable?: boolean }[];
   /** Visible text (already privacy-gated + truncated). */
   text?: string;
   headings?: string[];
@@ -148,7 +148,11 @@ export function renderActiveTabContext(input: ActiveTabContextInput): string {
   if (input.elements?.length) {
     lines.push("INTERACTIVE ELEMENTS:");
     for (const e of input.elements.slice(0, 60)) {
-      lines.push(`[${e.id}] ${e.role} "${e.name}"`);
+      const state = [
+        e.enabled === false ? "disabled" : "",
+        e.clickable === true && e.actionable === false ? "not currently clickable" : "",
+      ].filter(Boolean).join(", ");
+      lines.push(`[${e.id}] ${e.role} "${e.name}"${state ? ` (${state})` : ""}`);
     }
   }
   if (input.text?.trim()) {
