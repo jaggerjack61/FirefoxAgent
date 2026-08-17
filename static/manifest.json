@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "Firefox Agent",
+  "version": "0.1.0",
+  "description": "A browser-native AI agent. Control Firefox with natural language through any OpenAI-compatible API.",
+
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab",
+    "sessions",
+    "webNavigation",
+    "webRequest"
+  ],
+  "optional_host_permissions": ["<all_urls>"],
+
+  "background": {
+    "scripts": ["background/index.js"]
+  },
+
+  "sidebar_action": {
+    "default_title": "Firefox Agent",
+    "default_panel": "sidebar/index.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    },
+    "open_at_install": false
+  },
+
+  "action": {
+    "default_title": "Open Firefox Agent sidebar",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["content/index.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "firefox-agent@example.org",
+      "strict_min_version": "128.0"
+    }
+  }
+}
