@@ -208,7 +208,7 @@ export function SettingsPanel(): JSX.Element {
       <section>
         <h3>About</h3>
         <p className="muted">
-          Firefox Agent v0.1.0 — browser-native AI agent. The model decides what it wants to do;
+          BrowserAgent v0.1.0 — browser-native AI agent. The model decides what it wants to do;
           trusted extension code decides what it is allowed to do and performs the action.
         </p>
       </section>

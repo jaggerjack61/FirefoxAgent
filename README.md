@@ -1,4 +1,4 @@
-# Firefox Agent
+# BrowserAgent
 
 A production-ready Firefox extension that turns your browser into an AI agent. Type natural-language commands — *"Summarize this page"*, *"Compare the laptops in these three tabs"*, *"Search for the latest sidebar docs and give me the important points"* — and the agent reads, navigates, compares and acts across **multiple tabs** while keeping one continuous conversation.
 
@@ -38,7 +38,7 @@ npm run build      # icons + background + content + sidebar -> dist/
 2. Click **Load Temporary Add-on…**
 3. Select `dist/manifest.json`
 
-The toolbar button opens the **Firefox Agent** sidebar. (In an installed/packaged build the sidebar is available from the browser sidebar menu.)
+The toolbar button opens the **BrowserAgent** sidebar. (In an installed/packaged build the sidebar is available from the browser sidebar menu.)
 
 ### 3. Configure a provider
 
@@ -126,6 +126,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [TESTING.md](TESTING.md).
 ## Privacy
 
 - Page content may be sent to the configured AI provider **only when necessary to perform a request**, and only as permitted by Settings → Privacy & access.
+- Firefox's install prompt discloses the data sent to that provider: the API credential, browsing and website content/activity, search terms, and chat instructions. Firefox 140 or newer is required so this consent is handled by Firefox's built-in data-collection permission flow.
 - **Password inputs are always excluded** from page snapshots, in every mode.
 - API keys live only in extension storage; they are never injected into pages, never exposed to page JavaScript, and always redacted from dev views and logs.
 - Raw page contents are **not** persisted. The extension stores summaries, facts and task state only.

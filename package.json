@@ -1,7 +1,7 @@
 {
-  "name": "firefox-agent",
+  "name": "browser-agent",
   "version": "0.1.0",
-  "description": "Browser-native AI agent for Firefox: control your browser with natural language through any OpenAI-compatible API.",
+  "description": "Browser-native AI agent: control your browser with natural language through any OpenAI-compatible API.",
   "type": "module",
   "private": true,
   "engines": {
@@ -15,7 +15,7 @@
     "test:watch": "vitest",
     "test:e2e": "npm run build && playwright test",
     "start:firefox": "npm run build && web-ext run --source-dir dist --no-config-discovery",
-    "package": "npm run build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --no-config-discovery",
+    "package": "npm run build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest --no-config-discovery",
     "serve:preview": "vite preview --port 4173"
   },
   "dependencies": {
@@ -36,7 +36,7 @@
     "typescript": "^5.6.3",
     "vite": "^6.0.5",
     "vitest": "^3.0.4",
-    "web-ext": "^8.3.0"
+    "web-ext": "^10.6.0"
   },
   "allowScripts": {
     "esbuild@0.25.12": true

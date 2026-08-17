@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Firefox Agent",
+  "name": "BrowserAgent",
   "version": "0.1.0",
-  "description": "A browser-native AI agent. Control Firefox with natural language through any OpenAI-compatible API.",
+  "description": "A browser-native AI agent. Control your browser with natural language through any OpenAI-compatible API.",
 
   "permissions": [
     "storage",
@@ -20,7 +20,7 @@
   },
 
   "sidebar_action": {
-    "default_title": "Firefox Agent",
+    "default_title": "BrowserAgent",
     "default_panel": "sidebar/index.html",
     "default_icon": {
       "16": "icons/icon-16.png",
@@ -31,7 +31,7 @@
   },
 
   "action": {
-    "default_title": "Open Firefox Agent sidebar",
+    "default_title": "Open BrowserAgent sidebar",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -57,7 +57,20 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "firefox-agent@example.org",
-      "strict_min_version": "128.0"
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "authenticationInfo",
+          "browsingActivity",
+          "personalCommunications",
+          "searchTerms",
+          "websiteActivity",
+          "websiteContent"
+        ]
+      }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
     }
   }
 }

@@ -103,7 +103,7 @@ export function ChatView(): JSX.Element {
 
       {!hasSiteAccess && (
         <div className="access-banner">
-          <span>Firefox Agent needs site access to inspect pages.</span>
+          <span>BrowserAgent needs site access to inspect pages.</span>
           <button onClick={() => void ensurePermissions()}>Grant access</button>
         </div>
       )}

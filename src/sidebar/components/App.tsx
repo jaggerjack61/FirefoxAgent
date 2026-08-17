@@ -27,7 +27,7 @@ export function App(): JSX.Element {
       <header className="app-header">
         <div className="app-title">
           <span className="logo">✦</span>
-          <span>Firefox Agent</span>
+          <span>BrowserAgent</span>
           {busy && <span className="pulse-dot" title="Agent running" />}
         </div>
         <nav className="view-tabs">
