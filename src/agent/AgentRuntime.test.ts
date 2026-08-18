@@ -15,7 +15,7 @@ import { ConfirmationManager } from "./ConfirmationManager";
 import { WorkspaceManager } from "@/workspace/WorkspaceManager";
 import { createToolRegistry } from "@/tools/index";
 import { FakeGateway, FakeMemoryStore, FakeProvider } from "@/test/fakes";
-import type { AppSettings, LLMResponse, ToolCall } from "@/shared/types";
+import type { AgentMode, AppSettings, LLMResponse, ToolCall } from "@/shared/types";
 import type { BackgroundEvent } from "@/shared/events";
 import { ToolError } from "@/shared/errors";
 import { DEFAULT_SETTINGS } from "@/settings/SettingsRepository";
@@ -51,7 +51,7 @@ interface Harness {
   store: FakeMemoryStore;
 }
 
-function createHarness(providerScript: LLMResponse[], opts: { mode?: "agent" | "interactive"; tabs?: { id: number; title: string; url: string }[]; pages?: Record<number, ReturnType<typeof makeSnapshot>> } = {}): Harness {
+function createHarness(providerScript: LLMResponse[], opts: { mode?: AgentMode; tabs?: { id: number; title: string; url: string }[]; pages?: Record<number, ReturnType<typeof makeSnapshot>> } = {}): Harness {
   const store = new FakeMemoryStore();
   const gateway = new FakeGateway({
     tabs: opts.tabs ?? [{ id: 1, title: "Search results", url: "https://shop.example/search?q=laptop" }],
@@ -294,6 +294,27 @@ describe("AgentRuntime — security", () => {
     expect(harness.gateway.clicks).toHaveLength(1);
   });
 
+  it("executes high-risk actions in YOLO mode without confirmation", async () => {
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "click_element", { elementId: "E2" })], finishReason: "tool_calls" },
+      finalResponse("Order placed."),
+    ], {
+      mode: "yolo",
+      tabs: [{ id: 1, title: "Shop", url: "https://shop.example/checkout" }],
+      pages: {
+        1: makeSnapshot("https://shop.example/checkout", "Checkout", [{ id: "E2", role: "button", name: "Place order" }], "x"),
+      },
+    });
+    harness.gateway.describeElement = async () => ({ name: "Place order", role: "button", tag: "button", inForm: true });
+
+    const result = await harness.runtime.run("Place the order without asking");
+
+    expect(result.status).toBe("completed");
+    expect(harness.gateway.clicks).toHaveLength(1);
+    expect(harness.confirmations.pendingRequest).toBeNull();
+    expect(harness.events.some((event) => event.type === "CONFIRMATION_REQUESTED")).toBe(false);
+  });
+
   it("honors a tool's always-confirm metadata", async () => {
     const harness = createHarness([
       { content: null, toolCalls: [toolCall("c1", "clear_memory", {})], finishReason: "tool_calls" },
@@ -306,6 +327,19 @@ describe("AgentRuntime — security", () => {
     const result = await promise;
 
     expect(result.status).toBe("completed");
+  });
+
+  it("bypasses tool-declared confirmation in YOLO mode", async () => {
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "clear_memory", {})], finishReason: "tool_calls" },
+      finalResponse("Memory cleared."),
+    ], { mode: "yolo" });
+
+    const result = await harness.runtime.run("Forget all remembered facts");
+
+    expect(result.status).toBe("completed");
+    expect(harness.confirmations.pendingRequest).toBeNull();
+    expect(harness.events.some((event) => event.type === "CONFIRMATION_REQUESTED")).toBe(false);
   });
 
   it("returns structured errors to the model for failed tools", async () => {
@@ -392,6 +426,7 @@ describe("AgentRuntime — provider-compatible tool history", () => {
     const currentTools = current.provider.requests[0].tools?.map((tool) => tool.function.name) ?? [];
     const currentPrompt = current.provider.requests[0].messages.map((message) => message.content ?? "").join("\n");
     expect(currentTools).toContain("click_element");
+    expect(currentTools).toContain("download_file");
     expect(currentTools).not.toContain("list_tabs");
     expect(currentTools).not.toContain("open_tab");
     expect(currentPrompt).toContain("every command refers to the current ACTIVE TAB");

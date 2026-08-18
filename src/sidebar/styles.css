@@ -380,6 +380,17 @@ body {
   font-size: 13px;
 }
 
+.yolo-warning {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 75%, var(--border));
+  color: var(--text);
+  padding: 9px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 6px 0 10px;
+}
+
 .access-banner {
   display: flex;
   align-items: center;

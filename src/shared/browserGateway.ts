@@ -55,6 +55,25 @@ export interface NavigateResult extends InteractionResult {
   networkIdle?: boolean;
 }
 
+export type DownloadConflictAction = "uniquify" | "overwrite" | "prompt";
+
+export interface DownloadFileOptions {
+  /** Path relative to the browser's Downloads directory. */
+  filename?: string;
+  /** Ask Firefox to show its file chooser. */
+  saveAs?: boolean;
+  conflictAction?: DownloadConflictAction;
+}
+
+export interface DownloadResult {
+  queued: true;
+  downloadId: number;
+  url: string;
+  requestedFilename?: string;
+  saveAs: boolean;
+  conflictAction: DownloadConflictAction;
+}
+
 export interface BrowserGateway {
   // ---- tabs ---------------------------------------------------------------
   listTabs(): Promise<TabMeta[]>;
@@ -74,6 +93,10 @@ export interface BrowserGateway {
   // ---- navigation ---------------------------------------------------------
   /** Navigates a tab and waits for load completion (bounded). */
   navigate(tabId: number, url: string, opts?: { timeoutMs?: number }): Promise<NavigateResult>;
+
+  // ---- downloads ----------------------------------------------------------
+  /** Queues a URL with Firefox's download manager. File type is unrestricted. */
+  downloadFile(url: string, opts?: DownloadFileOptions): Promise<DownloadResult>;
 
   // ---- content scripts ----------------------------------------------------
   hasHostAccess(url: string): Promise<boolean>;

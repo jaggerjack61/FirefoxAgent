@@ -100,7 +100,7 @@ export interface ProviderConfig {
 // Settings
 // ---------------------------------------------------------------------------
 
-export type AgentMode = "interactive" | "agent";
+export type AgentMode = "interactive" | "agent" | "yolo";
 
 export interface AgentLimits {
   maxActionsPerTask: number;

@@ -21,6 +21,7 @@ describe("ToolRegistry", () => {
     expect(names).toContain("click_element");
     expect(names).toContain("get_workspace_tabs");
     expect(names).toContain("search_web");
+    expect(names).toContain("download_file");
     expect(new Set(names).size).toBe(names.length);
   });
 
@@ -81,6 +82,33 @@ describe("ToolRegistry", () => {
     });
     const output = await registry.executeCall("list_tabs", {}, { ...context, gateway });
     expect((output as { tabs: unknown[] }).tabs).toHaveLength(1);
+  });
+
+  it("validates and queues downloads without restricting the file type", async () => {
+    const registry = createToolRegistry();
+    const gateway = new FakeGateway();
+    const input = registry.validateCall("download_file", {
+      url: "https://cdn.example.test/media/demo.mp4",
+      filename: "videos/demo.mp4",
+    });
+
+    const output = await registry.executeCall("download_file", input, { ...context, gateway });
+
+    expect(gateway.downloads).toEqual([{
+      url: "https://cdn.example.test/media/demo.mp4",
+      options: { filename: "videos/demo.mp4", saveAs: false, conflictAction: "uniquify" },
+    }]);
+    expect(output).toMatchObject({ downloadId: 1, requestedFilename: "videos/demo.mp4" });
+  });
+
+  it("rejects non-web download URLs and unsafe filenames", () => {
+    const registry = createToolRegistry();
+
+    expect(() => registry.validateCall("download_file", { url: "file:///etc/passwd" })).toThrow(ToolError);
+    expect(() => registry.validateCall("download_file", {
+      url: "https://example.test/file.txt",
+      filename: "../outside.txt",
+    })).toThrow(ToolError);
   });
 
   it("returns clickable elements with a page text read", async () => {

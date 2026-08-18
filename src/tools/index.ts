@@ -53,6 +53,7 @@ import {
 } from "./interactionTools";
 import { extractTableTool, extractListTool, extractLinksTool, extractStructuredContentTool } from "./extractionTools";
 import { navigateTool, searchWebTool } from "./navigationTools";
+import { downloadFileTool } from "./downloadTools";
 import {
   getWorkspaceTabsTool,
   getWorkspaceMemoryTool,
@@ -120,6 +121,9 @@ export function createToolRegistry(): ToolRegistry {
   // Navigation / search
   registry.register(navigateTool);
   registry.register(searchWebTool);
+
+  // Downloads
+  registry.register(downloadFileTool);
 
   // Workspace & memory
   registry.register(getWorkspaceTabsTool);

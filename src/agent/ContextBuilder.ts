@@ -11,14 +11,14 @@
  * Webpage content is wrapped as untrusted data — never as instructions.
  */
 
-import type { AppSettings, LLMMessage } from "@/shared/types";
+import type { AgentMode, AppSettings, LLMMessage } from "@/shared/types";
 import { wrapPageContent, wrapObservation } from "@/security/injection";
 import { estimateTokens } from "@/shared/tokens";
 import { formatClock } from "@/shared/id";
 
 export interface SystemPromptInput {
   settings: AppSettings;
-  mode: string;
+  mode: AgentMode;
   toolDescriptions: string;
   maxActions: number;
 }
@@ -26,6 +26,17 @@ export interface SystemPromptInput {
 /** The trusted system prompt — page content can never modify it. */
 export function buildSystemPrompt(input: SystemPromptInput): string {
   const { settings } = input;
+  const confirmationRule = input.mode === "yolo"
+    ? "- YOLO mode: execute actions without asking the user for confirmation, including destructive, financial, sending, login, form-submission, and sensitive-field actions."
+    : "- Read-only actions (listing, inspecting) need no permission. Destructive, financial, or sending actions require user confirmation — the system enforces this.";
+  const modeRule = input.mode === "yolo"
+    ? "- YOLO mode: proceed autonomously with every action and do not ask for approval."
+    : "- Interactive mode: ask the user before meaningful browser actions. Agent mode: proceed autonomously with low-risk actions.";
+  const modeDescription = input.mode === "yolo"
+    ? "fully autonomous; all confirmations disabled"
+    : input.mode === "agent"
+      ? "autonomous, low-risk actions run automatically"
+      : "asks before meaningful actions";
   return [
     "You are BrowserAgent, a browser-native AI assistant that controls the user's browser.",
     "You operate through a strict tool-calling protocol. You cannot touch the browser directly — you can only request tools, and trusted extension code performs them.",
@@ -47,8 +58,8 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
     "- If networkIdle=false after the bounded wait, the site likely uses polling or streaming. Continue from the completed document; do NOT retry or reload solely to make networkIdle become true.",
     "- Workspace summaries and facts are already included below. Use them directly instead of calling another tool or re-reading inspected pages.",
     "- For multi-tab comparisons: inspect each tab once, remember facts per tab, then answer from workspace context.",
-    "- Read-only actions (listing, inspecting) need no permission. Destructive, financial, or sending actions require user confirmation — the system enforces this.",
-    "- Interactive mode: ask the user before meaningful browser actions. Agent mode: proceed autonomously with low-risk actions.",
+    confirmationRule,
+    modeRule,
     "- Keep answers concise and useful. For comparisons, use a table.",
     `- Maximum ${input.maxActions} tool calls per request.`,
     "",
@@ -56,7 +67,7 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
     input.toolDescriptions,
     "",
     "## Environment",
-    `Mode: ${settings.mode} (${input.mode === "agent" ? "autonomous, low-risk actions run automatically" : "asks before meaningful actions"})`,
+    `Mode: ${settings.mode} (${modeDescription})`,
     `Search engine: ${settings.searchEngine}`,
     "Stale element ids are remapped automatically. Call get_page_snapshot only if automatic recovery reports ELEMENT_NOT_FOUND. If an explicitly referenced tab is gone, list tabs.",
   ].join("\n");

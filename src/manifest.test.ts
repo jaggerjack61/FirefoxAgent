@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 interface FirefoxManifest {
   name?: string;
   description?: string;
+  permissions?: string[];
   sidebar_action?: { default_title?: string };
   action?: { default_title?: string };
   browser_specific_settings?: {
@@ -56,5 +57,13 @@ describe("Firefox manifest", () => {
     expect(manifest.browser_specific_settings?.gecko_android).toEqual({
       strict_min_version: "142.0",
     });
+  });
+
+  it("requests permission to queue files with Firefox's download manager", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL("../static/manifest.json", import.meta.url), "utf8"),
+    ) as FirefoxManifest;
+
+    expect(manifest.permissions).toContain("downloads");
   });
 });

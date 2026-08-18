@@ -16,8 +16,9 @@ Works with **any OpenAI-compatible API** (OpenAI, DeepSeek, Ollama, LM Studio, v
 - **Current-page by default** — commands apply to the active page unless you explicitly mention another/new/background tab
 - **Stable element IDs** (`[3] link "Pricing"` → `click_element(3)`) with semantic re-matching when the DOM changes
 - **Reliable interactions** with auto-waiting for visible, enabled, editable, stable and unobscured controls before click/fill actions
+- **Direct downloads** of images, videos, audio, documents, archives, text, and other HTTP(S) resources through Firefox's download manager, with approval bypassed only in YOLO mode
 - **Prompt-injection defense** — web content is wrapped as untrusted data; the LLM can never be hijacked by a page
-- **Confirmation enforcement outside the model layer** — checkout, delete, send, login and password actions always ask the user first
+- **Three behavior modes** — Interactive asks before meaningful actions, Agent automates low-risk actions, and YOLO explicitly disables all confirmations
 - **Context compression + token budgeting** — long research sessions keep working without blowing the model's context window
 - **Session persistence** (IndexedDB) — conversations, workspaces, task state and provider settings survive restarts
 - **Stop button**, action history, undo (closed tabs / input values), developer mode
@@ -87,6 +88,7 @@ Models without native function calling are supported through an optional **struc
 | `tabs` | List/switch/open/close tabs for the agent |
 | `scripting` | Register content scripts after site access is granted |
 | `activeTab` | Inspect the active tab before host access is granted |
+| `downloads` | Save user-requested URLs of any file type through Firefox's download manager |
 | `sessions` | Restore recently closed tabs (undo) |
 | `webNavigation` | Frame detection for iframe-aware snapshots |
 | `webRequest` | Per-tab fetch/XHR/beacon completion tracking for bounded network-idle readiness; request bodies and headers are not read or stored |

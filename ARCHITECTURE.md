@@ -52,7 +52,7 @@ shared  ←  security  ←  tools  ←  agent  ←  background
 - `redact.ts`, `tokens.ts`, `id.ts` — secret redaction, token estimation, ids/time
 
 ### `src/security` — enforcement outside the model
-- `confirmation.ts` — pure rules: financial/destructive/send/login/form/password actions → required approval; interactive mode requires approval for all meaningful actions
+- `confirmation.ts` — pure, mode-aware rules: Interactive requires approval for meaningful actions, Agent requires approval for high-risk actions, and YOLO bypasses confirmations
 - `injection.ts` — untrusted-data wrapping (`<untrusted_page_content>`), instruction-phrase neutralization, injection detection
 - `privacy.ts` — privacy gates: what page data may leave the extension, sensitive-field masking
 
@@ -63,7 +63,7 @@ shared  ←  security  ←  tools  ←  agent  ←  background
 - validation (`validateCall` — model output is never trusted)
 - execution (`executeCall` with a typed `ToolContext`)
 
-The registry keeps the full compatibility catalog, but each request exposes only a task-relevant subset. Current-page interaction and inspection tools are the default; cross-tab, memory, history and undo tools are added only when the user explicitly refers to those scopes. Overlapping legacy aliases remain executable but are hidden from the model.
+The registry keeps the full compatibility catalog, but each request exposes only a task-relevant subset. Current-page interaction, inspection, and direct-download tools are the default; cross-tab, memory, history and undo tools are added only when the user explicitly refers to those scopes. `download_file` delegates HTTP(S) transfers of any MIME type to Firefox's download manager, so large files never enter agent memory. Overlapping legacy aliases remain executable but are hidden from the model.
 
 ### `src/agent` — the runtime
 - `AgentRuntime.run(userText)` implements the loop:
@@ -146,7 +146,7 @@ Content-script events are necessarily synthetic (`isTrusted === false`); unlike 
 `list_tabs` → inspect tab A (`summarize_tab`, which stores a local summary and key facts) → … → the runtime injects the compact combined workspace context → the LLM answers from facts, not raw pages. Follow-ups ("which one was cheapest?") reuse cached facts with zero tool calls.
 
 ### Confirmation enforcement
-`executeToolCall` → schema validation → `evaluateConfirmation` (pure rules, mode-aware) → if required: task goes `awaiting_user`, a `ConfirmationRequest` is pushed to the sidebar, and the loop **awaits the user's decision**. Denial becomes a `CONFIRMATION_DENIED` observation; the model continues.
+`executeToolCall` → schema validation → `evaluateConfirmation` (pure rules, mode-aware) → if required: task goes `awaiting_user`, a `ConfirmationRequest` is pushed to the sidebar, and the loop **awaits the user's decision**. Denial becomes a `CONFIRMATION_DENIED` observation; the model continues. YOLO mode explicitly bypasses both policy-derived and tool-declared confirmations while leaving schema validation, privacy gates, page scope, action budgets, and timeouts intact.
 
 ## Build
 

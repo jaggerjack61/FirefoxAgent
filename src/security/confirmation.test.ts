@@ -71,6 +71,12 @@ describe("confirmation policy", () => {
     expect(evaluateConfirmation("close_tabs", { ...base, tabCount: 3 }).required).toBe(true);
   });
 
+  it("requires download approval except in YOLO mode", () => {
+    expect(evaluateConfirmation("download_file", { mode: "agent" }).required).toBe(true);
+    expect(evaluateConfirmation("download_file", { mode: "interactive" }).required).toBe(true);
+    expect(evaluateConfirmation("download_file", { mode: "yolo" }).required).toBe(false);
+  });
+
   it("requires confirmation for login submissions", () => {
     const decision = evaluateConfirmation("click_element", { ...base, elementName: "Sign in" });
     expect(decision.required).toBe(true);
@@ -79,6 +85,21 @@ describe("confirmation policy", () => {
   it("allows ordinary navigation clicks in agent mode", () => {
     expect(evaluateConfirmation("click_element", { ...base, elementName: "Pricing" }).required).toBe(false);
     expect(evaluateConfirmation("click_element", { ...base, elementName: "Documentation" }).required).toBe(false);
+  });
+
+  it("never requires confirmation in YOLO mode", () => {
+    const cases: Array<[string, Omit<ConfirmationContext, "mode">]> = [
+      ["click_element", { elementName: "Place order", pageUrl: "https://shop.example/checkout", submittingForm: true }],
+      ["click_element", { elementName: "Delete account" }],
+      ["click_element", { elementName: "Send message" }],
+      ["click_element", { elementName: "Sign in" }],
+      ["type_text", { sensitiveField: true }],
+      ["close_tabs", { tabCount: 5 }],
+    ];
+
+    for (const [tool, context] of cases) {
+      expect(evaluateConfirmation(tool, { mode: "yolo", ...context })).toEqual({ required: false, highRisk: false });
+    }
   });
 
   it("marks financial and destructive actions as irreversible", () => {

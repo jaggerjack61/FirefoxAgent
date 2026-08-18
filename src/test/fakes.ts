@@ -3,7 +3,7 @@
  * Used by unit + integration tests so nothing touches real Firefox APIs.
  */
 
-import type { BrowserGateway, ElementDescriptor, InteractionResult, NavigateResult, TabMeta, UndoableAction } from "@/shared/browserGateway";
+import type { BrowserGateway, DownloadFileOptions, DownloadResult, ElementDescriptor, InteractionResult, NavigateResult, TabMeta, UndoableAction } from "@/shared/browserGateway";
 import type { ContentResponse, PageSnapshot } from "@/shared/contentProtocol";
 import type { MemoryStore, TaskRecord } from "@/memory/MemoryStore";
 import type { ConversationRecord, ChatMessageRecord, Fact, ProviderConfig, Workspace } from "@/shared/types";
@@ -111,6 +111,7 @@ export class FakeGateway implements BrowserGateway {
   navigated: { tabId: number; url: string }[] = [];
   closed: number[] = [];
   reloaded: number[] = [];
+  downloads: Array<{ url: string; options: DownloadFileOptions }> = [];
   undoStack: UndoableAction[] = [];
   hasAccess = true;
 
@@ -258,6 +259,17 @@ export class FakeGateway implements BrowserGateway {
     const tab = this.tabs.find((t) => t.id === tabId);
     if (tab) tab.url = url;
     return { success: true, observation: `Navigated to ${url}.`, pageChanged: true, newElements: [], tabId, url, title: "", finalUrl: url, loaded: true, networkIdle: true };
+  }
+  async downloadFile(url: string, options: DownloadFileOptions = {}): Promise<DownloadResult> {
+    this.downloads.push({ url, options });
+    return {
+      queued: true,
+      downloadId: this.downloads.length,
+      url,
+      ...(options.filename ? { requestedFilename: options.filename } : {}),
+      saveAs: options.saveAs ?? false,
+      conflictAction: options.conflictAction ?? "uniquify",
+    };
   }
   recordUndoable(action: UndoableAction): void {
     this.undoStack.push(action);

@@ -63,7 +63,7 @@ const AUTO_SUMMARIZE_TOOLS = new Set([
 ]);
 
 const CURRENT_PAGE_TOOLS = new Set([
-  "navigate", "search_web", "reload_tab", "go_back", "go_forward", "close_tab",
+  "navigate", "search_web", "download_file", "reload_tab", "go_back", "go_forward", "close_tab",
   "get_page_text", "get_visible_text", "get_page_structure", "get_forms", "find_text", "get_page_snapshot",
   "click_element", "focus_element", "type_text", "clear_input", "select_option", "set_checkbox",
   "scroll", "scroll_to_element", "hover_element", "press_key",
@@ -594,7 +594,8 @@ export class AgentRuntime {
       }
     }
     const policyDecision = evaluateConfirmation(call.name, ctx);
-    const declaredConfirmation = this.deps.registry.get(call.name)?.tool.requiresConfirmation === true;
+    const declaredConfirmation = settings.mode !== "yolo"
+      && this.deps.registry.get(call.name)?.tool.requiresConfirmation === true;
     const decision = declaredConfirmation && !policyDecision.required
       ? { required: true, highRisk: false, reason: "This tool always requires explicit approval." }
       : policyDecision;
@@ -682,6 +683,8 @@ export class AgentRuntime {
         return `Open ${pretty(args.url ?? "")}`;
       case "navigate":
         return `Navigate to ${pretty(args.url ?? "")}`;
+      case "download_file":
+        return `Download ${pretty(args.filename ?? args.url ?? "")}`;
       case "switch_tab":
         return `Switch to tab ${pretty(args.tabId ?? "")}`;
       case "close_tab":

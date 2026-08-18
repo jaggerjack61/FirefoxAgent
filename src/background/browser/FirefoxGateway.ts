@@ -10,7 +10,7 @@
  *  - compact observation formatting (never the full DOM)
  */
 
-import type { BrowserGateway, ElementDescriptor, InteractionResult, NavigateResult, OpenTabOptions, TabMeta, UndoableAction } from "@/shared/browserGateway";
+import type { BrowserGateway, DownloadFileOptions, DownloadResult, ElementDescriptor, InteractionResult, NavigateResult, OpenTabOptions, TabMeta, UndoableAction } from "@/shared/browserGateway";
 import type { ContentRequest, ContentResponse, PageSnapshot, SnapshotRequestOptions } from "@/shared/contentProtocol";
 import { ToolError } from "@/shared/errors";
 import { elementIdForFrame, splitElementId } from "@/shared/contentProtocol";
@@ -196,6 +196,39 @@ export class FirefoxGateway implements BrowserGateway {
       loaded,
       networkIdle,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Downloads
+  // -------------------------------------------------------------------------
+
+  async downloadFile(url: string, opts: DownloadFileOptions = {}): Promise<DownloadResult> {
+    if (!browser.downloads?.download) {
+      throw new ToolError("NOT_IMPLEMENTED", "This browser does not provide the Downloads API.");
+    }
+    const conflictAction = opts.conflictAction ?? "uniquify";
+    const saveAs = opts.saveAs ?? false;
+    try {
+      const downloadId = await browser.downloads.download({
+        url,
+        ...(opts.filename ? { filename: opts.filename } : {}),
+        conflictAction,
+        saveAs,
+      });
+      return {
+        queued: true,
+        downloadId,
+        url,
+        ...(opts.filename ? { requestedFilename: opts.filename } : {}),
+        saveAs,
+        conflictAction,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ToolError("DOWNLOAD_FAILED", `Firefox could not start the download: ${message}`, {
+        suggestedAction: "Check that the URL is a direct HTTP(S) resource and retry with a valid relative filename.",
+      });
+    }
   }
 
   /** Polling avoids missing a very fast `complete` event between update/listen. */

@@ -102,8 +102,18 @@ const NAVIGATION_TOOLS = new Set([
 ]);
 
 export function evaluateConfirmation(toolName: string, ctx: ConfirmationContext): ConfirmationDecision {
+  // YOLO mode is an explicit user choice to disable policy confirmations.
+  // The runtime separately bypasses tool-declared approvals in this mode;
+  // schema validation, privacy, scope, and budgets remain enforced.
+  if (ctx.mode === "yolo") return { required: false, highRisk: false };
+
   // 1. Read-only tools never require confirmation.
   if (READ_TOOLS.has(toolName) || SAFE_CONTEXT_TOOLS.has(toolName)) return { required: false, highRisk: false };
+
+  // Downloads write arbitrary internet content to the user's device.
+  if (toolName === "download_file") {
+    return { required: true, highRisk: false, reason: "Downloading a file to this device." };
+  }
 
   // 2. Interactive mode: anything beyond reads needs approval.
   if (ctx.mode === "interactive" && !NAVIGATION_TOOLS.has(toolName)) {

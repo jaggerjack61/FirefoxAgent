@@ -90,6 +90,53 @@ describe("FirefoxGateway host access", () => {
   });
 });
 
+describe("FirefoxGateway downloads", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("queues arbitrary file types with Firefox's download manager", async () => {
+    const download = vi.fn(async () => 42);
+    vi.stubGlobal("browser", {
+      tabs: { onUpdated: { addListener: vi.fn() } },
+      downloads: { download },
+    });
+    const gateway = new FirefoxGateway();
+
+    const result = await gateway.downloadFile("https://cdn.example.test/image.png", {
+      filename: "images/image.png",
+      conflictAction: "overwrite",
+      saveAs: false,
+    });
+
+    expect(download).toHaveBeenCalledWith({
+      url: "https://cdn.example.test/image.png",
+      filename: "images/image.png",
+      conflictAction: "overwrite",
+      saveAs: false,
+    });
+    expect(result).toEqual({
+      queued: true,
+      downloadId: 42,
+      url: "https://cdn.example.test/image.png",
+      requestedFilename: "images/image.png",
+      conflictAction: "overwrite",
+      saveAs: false,
+    });
+  });
+
+  it("returns a structured error when Firefox rejects a download", async () => {
+    vi.stubGlobal("browser", {
+      tabs: { onUpdated: { addListener: vi.fn() } },
+      downloads: { download: vi.fn(async () => { throw new Error("Invalid filename"); }) },
+    });
+    const gateway = new FirefoxGateway();
+
+    await expect(gateway.downloadFile("https://example.test/file.txt", { filename: "/bad.txt" }))
+      .rejects.toMatchObject({ code: "DOWNLOAD_FAILED", message: expect.stringContaining("Invalid filename") });
+  });
+});
+
 describe("FirefoxGateway snapshots and recovery", () => {
   afterEach(() => {
     vi.useRealTimers();

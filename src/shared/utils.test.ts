@@ -89,6 +89,19 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("- list_tabs: list tabs");
     expect(prompt).toContain("25");
   });
+
+  it("tells the model that YOLO mode disables confirmations", () => {
+    const prompt = buildSystemPrompt({
+      settings: { mode: "yolo", searchEngine: "google" } as never,
+      mode: "yolo",
+      toolDescriptions: "- click_element: click an element",
+      maxActions: 25,
+    });
+
+    expect(prompt).toContain("YOLO mode: proceed autonomously with every action");
+    expect(prompt).toContain("all confirmations disabled");
+    expect(prompt).not.toContain("Destructive, financial, or sending actions require user confirmation");
+  });
 });
 
 describe("renderActiveTabContext", () => {

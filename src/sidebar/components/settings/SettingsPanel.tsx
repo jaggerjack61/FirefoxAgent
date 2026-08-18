@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AppSettings } from "@/shared/types";
+import type { AgentMode, AppSettings } from "@/shared/types";
 import { useAgentStore } from "../../store/agentStore";
 
 /** Settings panel: provider, mode, limits, privacy, memory, dev mode. */
@@ -128,11 +128,17 @@ export function SettingsPanel(): JSX.Element {
       <section>
         <h3>Behavior</h3>
         <label>Mode
-          <select value={settings.mode} onChange={(e) => update({ mode: e.target.value as "interactive" | "agent" })}>
+          <select aria-label="Mode" value={settings.mode} onChange={(e) => update({ mode: e.target.value as AgentMode })}>
             <option value="agent">Agent — low-risk actions run automatically</option>
             <option value="interactive">Interactive — ask before meaningful actions</option>
+            <option value="yolo">YOLO — run every action without approval</option>
           </select>
         </label>
+        {settings.mode === "yolo" && (
+          <div className="yolo-warning" role="alert">
+            YOLO mode disables all confirmations, including purchases, messages, logins, destructive actions, and clearing memory.
+          </div>
+        )}
         <label>Max actions per request
           <input type="number" min={1} value={settings.limits.maxActionsPerTask} onChange={(e) => update({ limits: { ...settings.limits, maxActionsPerTask: Number(e.target.value) } })} />
         </label>

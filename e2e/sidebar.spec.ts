@@ -335,6 +335,19 @@ test("settings: provider defaults to DeepSeek and can fetch models", async ({ pa
   void mock;
 });
 
+test("settings: YOLO mode warns that all confirmations are disabled", async ({ page }) => {
+  await installMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings" }).click();
+
+  await page.getByRole("combobox", { name: "Mode", exact: true }).selectOption("yolo");
+
+  await expect(page.getByRole("alert")).toContainText("YOLO mode disables all confirmations");
+  await expect(page.getByRole("alert")).toContainText("purchases");
+  const sent = await page.evaluate(() => (window as unknown as { __FFA_SENT?: Array<{ type: string; settings?: { mode?: string } }> }).__FFA_SENT ?? []);
+  expect(sent.some((request) => request.type === "SET_SETTINGS" && request.settings?.mode === "yolo")).toBe(true);
+});
+
 test("dev panel: visible only in dev mode and shows context sizes", async ({ page }) => {
   await installMock(page, { devMode: true });
   await page.goto("/");
