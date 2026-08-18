@@ -63,7 +63,7 @@ shared  ←  security  ←  tools  ←  agent  ←  background
 - validation (`validateCall` — model output is never trusted)
 - execution (`executeCall` with a typed `ToolContext`)
 
-The registry keeps the full compatibility catalog, but each request exposes only a task-relevant subset. Current-page interaction, inspection, and direct-download tools are the default; cross-tab, memory, history and undo tools are added only when the user explicitly refers to those scopes. `download_file` delegates HTTP(S) transfers of any MIME type to Firefox's download manager, so large files never enter agent memory. Overlapping legacy aliases remain executable but are hidden from the model.
+The registry keeps a stable model-visible tool catalog on every request so the system-and-tools prompt prefix remains cacheable. Trusted runtime scope guards still reject cross-tab operations unless the user explicitly requested that scope. `download_file` delegates HTTP(S) transfers of any MIME type to Firefox's download manager, so large files never enter agent memory. Overlapping legacy aliases remain executable but are hidden from the model.
 
 ### `src/agent` — the runtime
 - `AgentRuntime.run(userText)` implements the loop:
@@ -76,11 +76,12 @@ send user request → build context → LLM →
 until: final response | awaiting user | max iterations | timeout | error | stopped
 ```
 
-- `ContextBuilder` — five context layers (system, conversation, active tab, workspace, task) + tool observations, all wrapped per the injection rules
-- `TokenBudget` — estimates every layer; plans compression tiers (drop active-tab text → compress conversation → facts-only workspace → drop tool descriptions)
-- `ContextCompressor` — verbatim recent messages, summarized older ones, preserved goals/facts
+- `ContextBuilder` — stable system/tool instructions plus conversation, active-tab, workspace, task, and tool-observation context, all wrapped per the injection rules
+- `TokenBudget` — estimates the prompt and triggers conversation compression when the configured context threshold is reached
+- `ContextCompressor` — creates discrete compacted conversation checkpoints; dynamic runtime context is appended so later requests extend the previous cacheable prefix exactly
 - `TaskManager` — explicit `AgentTask` state machine, persisted to IndexedDB
 - `ConfirmationManager` — pending approval requests; the loop **blocks** until the user decides; denial is fed back to the model as `CONFIRMATION_DENIED`; the LLM has no path to approve its own actions
+- Page-readiness timeouts stay inside the runtime: it performs one bounded local wait/retry and emits a deterministic chat result if the page is still blocked, avoiding repeated provider turns for unchanged loading state
 
 ### `src/providers` — the LLM layer
 `LLMProvider` interface (`send`, `supportsToolCalling`, `supportsStreaming`, `capabilities`, optional `listModels`). The OpenAI-compatible implementation supports:
@@ -90,22 +91,24 @@ until: final response | awaiting user | max iterations | timeout | error | stopp
 - retry with backoff for 429/5xx/network errors, per-attempt timeouts
 - capability auto-detection (local servers → no tools) with user overrides
 - structured-output fallback for models without function calling (`{"tool_calls": [...]}`)
+- provider-aware prompt caching: stable per-conversation cache keys, OpenAI cache breakpoints/options on supported GPT models, and DeepSeek's automatic cache behavior
+- normalized input, output, cache-hit, cache-miss, and cache-write usage from both streaming and non-streaming responses
 
 ### `src/workspace` — cross-tab context
 `WorkspaceManager` keeps per-tab `{summary, importantFacts, extractedEntities, lastInspectedAt, pageChangedSinceInspection}`. Facts are stale-marked when a tab's URL changes; closed tabs keep their facts in long-term memory. `renderForModel()` produces the compact workspace block the LLM sees — never raw page contents.
 
 ### `src/memory` / `src/settings`
-- `IndexedDbMemoryStore` — conversations, messages, workspace, facts, tasks, provider config
+- `IndexedDbMemoryStore` — conversations, messages, workspace, facts, tasks, provider config, and cumulative token/cache usage
 - `WebExtensionSettingsRepository` — settings in `storage.local`, provider config (with API key) in IndexedDB
 
 ### `src/background` — wiring
 - `FirefoxGateway` — real implementation of `BrowserGateway`: tab ops, navigation with document-plus-network-idle waiting, per-tab fetch/XHR/beacon accounting with a bounded fallback for polling/streaming sites, content-script registration after optional permission grant, snapshot caching + invalidation, stale-element recovery (refresh snapshot → semantic match → retry once), compact observation formatting
 - `TabCoordinator` — tab lifecycle events → workspace sync (URL changes, closes, activations), closed-tab records for undo
-- `Orchestrator` — owns runtime/workspace/tasks/confirmations, message persistence, dev-event buffer (redacted)
+- `Orchestrator` — owns runtime/workspace/tasks/confirmations, message persistence, token/cache aggregation, dev-event buffer (redacted)
 - `index.ts` — router for the typed sidebar protocol + content-script notifications
 
 ### `src/sidebar` — React UI
-Zustand store mirroring background state through pushed events (`MESSAGE_ADDED`, `STREAM_DELTA`, `ACTIVITY`, `CONFIRMATION_REQUESTED`, `WORKSPACE_CHANGED`, `AGENT_STATE`, `DEV_EVENT`). Views: Chat (with activity feed and confirmation banner), Context (workspace tabs, pin/add/remove), History (action log + data controls), Settings (provider with **Test connection** → `/models`, mode, limits, privacy, memory, dev mode), Dev (context sizes, tool calls, LLM requests — redacted).
+Zustand store mirroring background state through pushed events (`MESSAGE_ADDED`, `STREAM_DELTA`, `ACTIVITY`, `CONFIRMATION_REQUESTED`, `WORKSPACE_CHANGED`, `TOKEN_USAGE_UPDATED`, `AGENT_STATE`, `DEV_EVENT`). Views: Chat (with activity feed, confirmation banner, and compact cache/token/context telemetry above the composer), Context (workspace tabs, pin/add/remove), History (action log + data controls), Settings (provider with **Test connection** → `/models`, mode, limits, privacy, memory, dev mode), Dev (context sizes, tool calls, LLM requests — redacted).
 
 ## Message protocol
 

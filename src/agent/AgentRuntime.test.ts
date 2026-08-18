@@ -15,7 +15,7 @@ import { ConfirmationManager } from "./ConfirmationManager";
 import { WorkspaceManager } from "@/workspace/WorkspaceManager";
 import { createToolRegistry } from "@/tools/index";
 import { FakeGateway, FakeMemoryStore, FakeProvider } from "@/test/fakes";
-import type { AgentMode, AppSettings, LLMResponse, ToolCall } from "@/shared/types";
+import type { AgentMode, AppSettings, LLMResponse, LLMUsage, ToolCall } from "@/shared/types";
 import type { BackgroundEvent } from "@/shared/events";
 import { ToolError } from "@/shared/errors";
 import { DEFAULT_SETTINGS } from "@/settings/SettingsRepository";
@@ -49,6 +49,7 @@ interface Harness {
   confirmations: ConfirmationManager;
   events: BackgroundEvent[];
   store: FakeMemoryStore;
+  usageReports: Array<{ usage?: LLMUsage; estimatedInput: number; estimatedOutput: number; contextLimit: number }>;
 }
 
 function createHarness(providerScript: LLMResponse[], opts: { mode?: AgentMode; tabs?: { id: number; title: string; url: string }[]; pages?: Record<number, ReturnType<typeof makeSnapshot>> } = {}): Harness {
@@ -63,6 +64,7 @@ function createHarness(providerScript: LLMResponse[], opts: { mode?: AgentMode; 
   const tasks = new TaskManager(store);
   const events: BackgroundEvent[] = [];
   const confirmations = new ConfirmationManager({ emit: (e) => events.push(e) });
+  const usageReports: Harness["usageReports"] = [];
 
   const settings: AppSettings = {
     ...DEFAULT_SETTINGS,
@@ -81,10 +83,14 @@ function createHarness(providerScript: LLMResponse[], opts: { mode?: AgentMode; 
     emitDev: () => undefined,
     persistMessage: async () => undefined,
     getActionHistory: () => [],
+    getPromptCacheKey: () => "browser-agent-v1:test-conversation",
+    reportUsage: (usage, estimatedInput, estimatedOutput, contextLimit) => {
+      usageReports.push({ usage, estimatedInput, estimatedOutput, contextLimit });
+    },
   });
 
   void workspace.newWorkspace("Test");
-  return { runtime, gateway, provider, workspace, tasks, confirmations, events, store };
+  return { runtime, gateway, provider, workspace, tasks, confirmations, events, store, usageReports };
 }
 
 describe("AgentRuntime — three-tab comparison (spec §22)", () => {
@@ -417,7 +423,7 @@ describe("AgentRuntime — limits and control", () => {
 });
 
 describe("AgentRuntime — provider-compatible tool history", () => {
-  it("defaults to current-page tools unless another tab is explicit", async () => {
+  it("keeps the advertised tool catalog stable across task scopes", async () => {
     const current = createHarness([finalResponse("Ready.")], {
       tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
       pages: { 1: makeSnapshot("https://current.test", "Current", [], "Current page") },
@@ -427,8 +433,8 @@ describe("AgentRuntime — provider-compatible tool history", () => {
     const currentPrompt = current.provider.requests[0].messages.map((message) => message.content ?? "").join("\n");
     expect(currentTools).toContain("click_element");
     expect(currentTools).toContain("download_file");
-    expect(currentTools).not.toContain("list_tabs");
-    expect(currentTools).not.toContain("open_tab");
+    expect(currentTools).toContain("list_tabs");
+    expect(currentTools).toContain("open_tab");
     expect(currentPrompt).toContain("every command refers to the current ACTIVE TAB");
 
     const crossTab = createHarness([finalResponse("Ready.")], {
@@ -437,8 +443,117 @@ describe("AgentRuntime — provider-compatible tool history", () => {
     });
     await crossTab.runtime.run("Compare this tab with the other tab");
     const crossTabTools = crossTab.provider.requests[0].tools?.map((tool) => tool.function.name) ?? [];
-    expect(crossTabTools).toContain("list_tabs");
-    expect(crossTabTools).toContain("switch_tab");
+    expect(crossTabTools).toEqual(currentTools);
+  });
+
+  it("extends the exact prior request prefix across tool turns", async () => {
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "get_page_snapshot", {})], finishReason: "tool_calls" },
+      finalResponse("Done."),
+    ], {
+      tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
+      pages: { 1: makeSnapshot("https://current.test", "Current", [], "Current page") },
+    });
+
+    await harness.runtime.run("Read this page");
+
+    const [first, second] = harness.provider.requests;
+    expect(first.cacheKey).toBe("browser-agent-v1:test-conversation");
+    expect(first.cacheStablePrefix).toBe(true);
+    expect(second.messages.slice(0, first.messages.length)).toEqual(first.messages);
+    expect(second.tools).toEqual(first.tools);
+    expect(second.messages.at(-1)?.content).toContain("RUNTIME CONTEXT UPDATE");
+  });
+
+  it("waits locally without another provider request when a page remains loading", async () => {
+    const snapshot = makeSnapshot("https://loading.test", "Loading", [], "Initial page state");
+    const harness = createHarness([
+      {
+        content: null,
+        toolCalls: [toolCall("c1", "get_page_snapshot", {})],
+        finishReason: "tool_calls",
+        usage: { inputTokens: 2_000, outputTokens: 20 },
+      },
+      finalResponse("This response must not be requested."),
+    ], {
+      tabs: [{ id: 1, title: "Loading", url: "https://loading.test" }],
+      pages: { 1: snapshot },
+    });
+    let snapshotCalls = 0;
+    harness.gateway.getSnapshot = vi.fn(async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) return snapshot;
+      throw new ToolError("NAVIGATION_TIMEOUT", "The page in tab 1 is still loading.", { retryable: true });
+    });
+    const waitForReady = vi.spyOn(harness.gateway, "waitForTabReady").mockResolvedValue(false);
+
+    const result = await harness.runtime.run("Read this page");
+
+    expect(result.status).toBe("completed");
+    expect(result.finalText).toContain("stopped before sending another request to the model");
+    expect(harness.provider.requests).toHaveLength(1);
+    expect(harness.usageReports).toHaveLength(1);
+    expect(waitForReady).toHaveBeenCalledWith(1, 10_000);
+    expect(harness.provider.script).toHaveLength(1);
+    expect(harness.events).toContainEqual(expect.objectContaining({
+      type: "ACTIVITY",
+      activity: expect.objectContaining({
+        status: "running",
+        detail: expect.stringContaining("waiting locally without calling the model"),
+      }),
+    }));
+  });
+
+  it("continues to the model only after the local page wait reports readiness", async () => {
+    const snapshot = makeSnapshot("https://ready.test", "Ready", [], "Page is ready now");
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "get_page_snapshot", {})], finishReason: "tool_calls" },
+      finalResponse("The page is ready."),
+    ], {
+      tabs: [{ id: 1, title: "Ready", url: "https://ready.test" }],
+      pages: { 1: snapshot },
+    });
+    let snapshotCalls = 0;
+    harness.gateway.getSnapshot = vi.fn(async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls === 2) {
+        throw new ToolError("NAVIGATION_TIMEOUT", "The page in tab 1 is still loading.", { retryable: true });
+      }
+      return snapshot;
+    });
+    const waitForReady = vi.spyOn(harness.gateway, "waitForTabReady").mockResolvedValue(true);
+
+    const result = await harness.runtime.run("Read this page");
+
+    expect(result.status).toBe("completed");
+    expect(result.finalText).toBe("The page is ready.");
+    expect(waitForReady).toHaveBeenCalledTimes(1);
+    expect(harness.provider.requests).toHaveLength(2);
+    expect(harness.usageReports).toHaveLength(2);
+    const secondRequest = harness.provider.requests[1].messages.map((message) => message.content ?? "").join("\n");
+    expect(secondRequest).toContain("Page is ready now");
+  });
+
+  it("reports provider cache usage and context size", async () => {
+    const harness = createHarness([{
+      ...finalResponse("Done."),
+      usage: {
+        inputTokens: 2000,
+        outputTokens: 80,
+        cachedInputTokens: 1500,
+        cacheMissTokens: 500,
+        cacheWriteTokens: 256,
+      },
+    }]);
+
+    await harness.runtime.run("Summarize this page");
+
+    expect(harness.usageReports).toHaveLength(1);
+    expect(harness.usageReports[0]).toMatchObject({
+      usage: { cachedInputTokens: 1500, cacheMissTokens: 500, cacheWriteTokens: 256 },
+      contextLimit: 64_000,
+    });
+    expect(harness.usageReports[0].estimatedInput).toBeGreaterThan(0);
   });
 
   it("rejects model-invented cross-tab scope", async () => {

@@ -80,6 +80,18 @@ async function installMock(page: Page, opts?: { devMode?: boolean }): Promise<Mo
       pendingConfirmation: null,
       hasSiteAccess: true,
       activeTabId: 3,
+      tokenUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        cacheMissTokens: 0,
+        cacheWriteTokens: 0,
+        requestCount: 0,
+        cacheReportingRequests: 0,
+        estimatedRequests: 0,
+        lastContextTokens: 0,
+        contextLimitTokens: 64000,
+      },
     },
     listeners: new Set(),
     sent: [],
@@ -140,6 +152,21 @@ async function installMock(page: Page, opts?: { devMode?: boolean }): Promise<Mo
                   },
                 });
               for (const l of listeners) l({ type: "STREAM_DONE" });
+              for (const l of listeners) l({
+                type: "TOKEN_USAGE_UPDATED",
+                usage: {
+                  inputTokens: 12000,
+                  outputTokens: 640,
+                  cachedInputTokens: 9000,
+                  cacheMissTokens: 3000,
+                  cacheWriteTokens: 1024,
+                  requestCount: 3,
+                  cacheReportingRequests: 3,
+                  estimatedRequests: 0,
+                  lastContextTokens: 12000,
+                  contextLimitTokens: 64000,
+                },
+              });
               for (const l of listeners)
                 l({
                   type: "MESSAGE_ADDED",
@@ -217,6 +244,7 @@ async function installMock(page: Page, opts?: { devMode?: boolean }): Promise<Mo
 
 test("chat: sends a message and renders the streamed reply", async ({ page }) => {
   await installMock(page);
+  await page.setViewportSize({ width: 380, height: 720 });
   await page.goto("/");
   await expect(page.getByText("Ask anything about your browser")).toBeVisible();
 
@@ -232,6 +260,24 @@ test("chat: sends a message and renders the streamed reply", async ({ page }) =>
   await expect(page.getByText("Read current page")).toBeVisible();
   await expect(page.locator(".tool-call-item").filter({ hasText: "Read current page" }).getByText("Completed", { exact: true })).toBeVisible();
   await expect(page.getByText("Next action: get_page_snapshot", { exact: true })).toBeVisible();
+  const usageBar = page.getByTestId("token-usage-bar");
+  await expect(usageBar.getByText("75%", { exact: true })).toBeVisible();
+  await expect(usageBar.getByText("↑ 12.0k", { exact: true })).toBeVisible();
+  await expect(usageBar.getByText("↓ 640", { exact: true })).toBeVisible();
+  await expect(usageBar.getByText("19%", { exact: true })).toBeVisible();
+  await expect(usageBar.getByText("H 9.0k", { exact: true })).toBeVisible();
+  await expect(usageBar.getByText("M 3.0k", { exact: true })).toBeVisible();
+  await expect(usageBar.getByText("W 1.0k", { exact: true })).toBeVisible();
+  const [usageBox, composerBox] = await Promise.all([usageBar.boundingBox(), page.locator(".composer").boundingBox()]);
+  expect(usageBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(usageBox!.height).toBeLessThanOrEqual(40);
+  expect(usageBox!.y + usageBox!.height).toBeLessThanOrEqual(composerBox!.y + 1);
+  const usageDimensions = await usageBar.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(usageDimensions.scrollWidth).toBeLessThanOrEqual(usageDimensions.clientWidth);
   const sent = await page.evaluate(
     () => (window as unknown as { __FFA_SENT?: Array<{ type: string }> }).__FFA_SENT ?? [],
   );

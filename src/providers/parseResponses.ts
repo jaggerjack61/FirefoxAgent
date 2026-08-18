@@ -3,9 +3,9 @@
  * non-streamed. Maps its output items onto the provider-agnostic LLMResponse.
  */
 
-import type { LLMResponse, ToolCall } from "@/shared/types";
+import type { LLMResponse, LLMUsage, ToolCall } from "@/shared/types";
 import { ToolError } from "@/shared/errors";
-import type { ResponsesResponse, ResponsesStreamEvent } from "./wireTypes";
+import type { ResponsesResponse, ResponsesStreamEvent, ResponsesUsage } from "./wireTypes";
 import { parseToolArguments } from "./parseChat";
 
 export interface ResponsesStreamAccumulator {
@@ -13,6 +13,7 @@ export interface ResponsesStreamAccumulator {
   /** call_id -> { name, args } */
   toolCalls: Map<string, { name?: string; args: string }>;
   status: string;
+  usage?: LLMUsage;
 }
 
 export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
@@ -59,6 +60,7 @@ export function accumulateResponsesEvent(
     }
     case "response.completed":
       acc.status = event.response?.status ?? "completed";
+      acc.usage = parseResponsesUsage(event.response?.usage);
       break;
   }
 }
@@ -78,6 +80,7 @@ export function finalizeResponsesStream(acc: ResponsesStreamAccumulator): LLMRes
     content: acc.text || null,
     toolCalls,
     finishReason: toolCalls.length ? "tool_calls" : "stop",
+    usage: acc.usage,
   };
 }
 
@@ -99,8 +102,20 @@ export function parseResponsesResponse(data: ResponsesResponse): LLMResponse {
     content: textParts.length ? textParts.join("") : null,
     toolCalls,
     finishReason: toolCalls.length ? "tool_calls" : "stop",
-    usage: data.usage
-      ? { inputTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens }
+    usage: parseResponsesUsage(data.usage),
+  };
+}
+
+function parseResponsesUsage(usage: ResponsesUsage | undefined): LLMUsage | undefined {
+  if (!usage) return undefined;
+  const cachedInputTokens = usage.input_tokens_details?.cached_tokens;
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cachedInputTokens,
+    cacheMissTokens: usage.input_tokens !== undefined && cachedInputTokens !== undefined
+      ? Math.max(0, usage.input_tokens - cachedInputTokens)
       : undefined,
+    cacheWriteTokens: usage.input_tokens_details?.cache_write_tokens,
   };
 }

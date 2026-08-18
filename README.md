@@ -16,10 +16,13 @@ Works with **any OpenAI-compatible API** (OpenAI, DeepSeek, Ollama, LM Studio, v
 - **Current-page by default** — commands apply to the active page unless you explicitly mention another/new/background tab
 - **Stable element IDs** (`[3] link "Pricing"` → `click_element(3)`) with semantic re-matching when the DOM changes
 - **Reliable interactions** with auto-waiting for visible, enabled, editable, stable and unobscured controls before click/fill actions
+- **Token-free page waiting** — loading timeouts are retried locally and do not trigger repeated LLM requests while page state is unchanged
 - **Direct downloads** of images, videos, audio, documents, archives, text, and other HTTP(S) resources through Firefox's download manager, with approval bypassed only in YOLO mode
 - **Prompt-injection defense** — web content is wrapped as untrusted data; the LLM can never be hijacked by a page
 - **Three behavior modes** — Interactive asks before meaningful actions, Agent automates low-risk actions, and YOLO explicitly disables all confirmations
 - **Context compression + token budgeting** — long research sessions keep working without blowing the model's context window
+- **Provider prompt-cache optimization** — stable prompt prefixes, explicit OpenAI cache breakpoints, and provider usage accounting reduce repeated input work
+- **Live token telemetry** — a compact multicolor bar above the composer shows cache hit rate, uploaded/received tokens, and current context usage
 - **Session persistence** (IndexedDB) — conversations, workspaces, task state and provider settings survive restarts
 - **Stop button**, action history, undo (closed tabs / input values), developer mode
 - **Privacy controls** — choose what page data may be sent; password fields are always excluded

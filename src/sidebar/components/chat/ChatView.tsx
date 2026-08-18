@@ -3,6 +3,7 @@ import { useAgentStore } from "../../store/agentStore";
 import { MessageItem } from "./MessageItem";
 import { ActivityItem } from "./ActivityList";
 import { ConfirmationBanner } from "./ConfirmationBanner";
+import { TokenUsageBar } from "./TokenUsageBar";
 import type { ProviderConfig, ReasoningEffort } from "@/shared/types";
 
 const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -21,6 +22,7 @@ export function ChatView(): JSX.Element {
   const settings = useAgentStore((s) => s.settings);
   const saveSettings = useAgentStore((s) => s.saveSettings);
   const fetchModels = useAgentStore((s) => s.fetchModels);
+  const tokenUsage = useAgentStore((s) => s.tokenUsage);
 
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -194,6 +196,8 @@ export function ChatView(): JSX.Element {
         )}
         {error && <div className="error-banner">{error}</div>}
       </div>
+
+      <TokenUsageBar usage={tokenUsage} />
 
       <div className="composer">
         <textarea

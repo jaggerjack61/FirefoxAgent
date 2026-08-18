@@ -12,7 +12,11 @@ export interface ChatCompletionsToolCall {
 
 export interface ChatCompletionsMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | Array<{ type: "text"; text: string }> | null;
+  content: string | Array<{
+    type: "text";
+    text: string;
+    prompt_cache_breakpoint?: { mode: "explicit" };
+  }> | null;
   tool_calls?: ChatCompletionsToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -27,6 +31,9 @@ export interface ChatCompletionsRequest {
   temperature?: number;
   max_tokens?: number;
   stream?: boolean;
+  stream_options?: { include_usage: boolean };
+  prompt_cache_key?: string;
+  prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" };
   response_format?: { type: "json_object" } | { type: "json_schema"; json_schema: unknown };
   stop?: string[];
 }
@@ -39,7 +46,18 @@ export interface ChatCompletionsChunk {
     };
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: ChatCompletionsUsage;
+}
+
+export interface ChatCompletionsUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
 }
 
 export interface ChatCompletionsResponse {
@@ -47,7 +65,7 @@ export interface ChatCompletionsResponse {
     message: ChatCompletionsMessage;
     finish_reason: string;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: ChatCompletionsUsage;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,8 +82,11 @@ export interface ResponsesFunctionTool {
 
 export interface ResponsesMessageInput {
   type: "message";
-  role: "system" | "user" | "assistant";
-  content: Array<{ type: "output_text"; text: string } | { type: "input_text"; text: string }>;
+  role: "developer" | "system" | "user" | "assistant";
+  content: Array<
+    | { type: "output_text"; text: string }
+    | { type: "input_text"; text: string; prompt_cache_breakpoint?: { mode: "explicit" } }
+  >;
 }
 
 export interface ResponsesFunctionCallOutputInput {
@@ -85,6 +106,8 @@ export interface ResponsesRequest {
   temperature?: number;
   max_output_tokens?: number;
   stream?: boolean;
+  prompt_cache_key?: string;
+  prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" };
 }
 
 export interface ResponsesFunctionCall {
@@ -105,7 +128,16 @@ export type ResponsesOutputItem = ResponsesFunctionCall | ResponsesMessage;
 
 export interface ResponsesResponse {
   output: ResponsesOutputItem[];
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: ResponsesUsage;
+}
+
+export interface ResponsesUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
 }
 
 export interface ResponsesStreamEvent {
@@ -113,7 +145,7 @@ export interface ResponsesStreamEvent {
   item_id?: string;
   output_index?: number;
   delta?: string;
-  response?: { status?: string; usage?: { input_tokens?: number; output_tokens?: number } };
+  response?: { status?: string; usage?: ResponsesUsage };
   call_id?: string;
   name?: string;
   arguments?: string;

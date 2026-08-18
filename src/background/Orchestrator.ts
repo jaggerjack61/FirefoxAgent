@@ -16,6 +16,8 @@ import type {
   ConfirmationRequest,
   ConversationRecord,
   DevEvent,
+  LLMUsage,
+  TokenUsageMetrics,
   ToolActivityRecord,
   Workspace,
 } from "@/shared/types";
@@ -46,6 +48,7 @@ export class BackgroundOrchestrator {
   private activity: ToolActivityRecord[] = [];
   private actionLog: ActionLogEntry[] = [];
   private devEvents: DevEvent[] = [];
+  private tokenUsage: TokenUsageMetrics;
   private runtimeState: AgentRuntimeState = { status: "idle", iterations: 0 };
   private listeners = new Set<(event: BackgroundEvent) => void>();
 
@@ -62,6 +65,7 @@ export class BackgroundOrchestrator {
     this.confirmations = new ConfirmationManager({ emit: (e) => this.broadcast(e) });
     this.provider = provider;
     this.settings = settings;
+    this.tokenUsage = emptyTokenUsage(settings.provider.contextLimitTokens);
     this.registry = registry;
     this.runtime = this.buildRuntime(registry);
   }
@@ -82,6 +86,9 @@ export class BackgroundOrchestrator {
         await this.appendMessage(msg.role, msg.content, msg.toolCallId, msg.name);
       },
       getActionHistory: () => this.actionLog.slice(),
+      getPromptCacheKey: () => `browser-agent-v1:${this.conversation?.id ?? this.workspace.getWorkspace()?.conversationId ?? "session"}`,
+      reportUsage: (usage, estimatedInput, estimatedOutput, contextLimit) =>
+        this.recordUsage(usage, estimatedInput, estimatedOutput, contextLimit),
     });
   }
 
@@ -137,6 +144,7 @@ export class BackgroundOrchestrator {
     if (convId) {
       this.conversation = await this.store.loadConversation(convId);
       this.messages = await this.store.loadMessages(convId);
+      this.tokenUsage = normalizeTokenUsage(this.conversation?.tokenUsage, this.settings.provider.contextLimitTokens);
       this.runtime.setConversation(this.toLLMMessages(this.messages));
     }
   }
@@ -150,6 +158,7 @@ export class BackgroundOrchestrator {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messageIds: [],
+      tokenUsage: { ...this.tokenUsage },
     };
     this.conversation = conv;
     await this.store.saveConversation(conv);
@@ -171,17 +180,20 @@ export class BackgroundOrchestrator {
       pendingConfirmation: pending,
       hasSiteAccess: await this.gateway.hasHostAccess(active?.url ?? "https://example.com"),
       activeTabId: active?.id,
+      tokenUsage: { ...this.tokenUsage },
     };
   }
 
   async updateSettings(settings: AppSettings): Promise<void> {
     const activeConversation = this.runtime.getConversation();
     this.settings = settings;
+    this.tokenUsage = { ...this.tokenUsage, contextLimitTokens: settings.provider.contextLimitTokens };
     await this.settingsRepo.save(settings);
     this.provider = createProvider(settings.provider);
     this.runtime = this.buildRuntime(this.registry);
     this.runtime.setConversation(activeConversation);
     this.broadcast({ type: "AGENT_STATE", state: this.runtimeState });
+    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
   }
 
   getSettings(): AppSettings {
@@ -209,6 +221,7 @@ export class BackgroundOrchestrator {
   async newWorkspace(name?: string): Promise<Workspace> {
     const ws = await this.workspace.newWorkspace(name);
     this.messages = [];
+    this.resetTokenUsage();
     this.runtime.setConversation([]);
     return ws;
   }
@@ -284,11 +297,13 @@ export class BackgroundOrchestrator {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messageIds: [],
+      tokenUsage: emptyTokenUsage(this.settings.provider.contextLimitTokens),
     };
     this.conversation = conv;
     this.messages = [];
     this.activity = [];
     this.actionLog = [];
+    this.tokenUsage = emptyTokenUsage(this.settings.provider.contextLimitTokens);
     this.runtime.setConversation([]);
     await this.store.saveConversation(conv);
     if (ws) {
@@ -296,6 +311,7 @@ export class BackgroundOrchestrator {
       await this.store.saveWorkspace(ws);
     }
     this.broadcast({ type: "CONVERSATION_RESET", conversationId: conv.id });
+    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
   }
 
   async clearConversation(): Promise<void> {
@@ -305,10 +321,13 @@ export class BackgroundOrchestrator {
     this.messages = [];
     this.activity = [];
     this.actionLog = [];
+    this.resetTokenUsage();
     this.runtime.setConversation([]);
     conv.messageIds = [];
+    conv.tokenUsage = { ...this.tokenUsage };
     conv.updatedAt = Date.now();
     await this.store.saveConversation(conv);
+    this.broadcast({ type: "CONVERSATION_RESET", conversationId: conv.id });
   }
 
   // -------------------------------------------------------------------------
@@ -321,6 +340,7 @@ export class BackgroundOrchestrator {
     this.activity = [];
     this.actionLog = [];
     this.devEvents = [];
+    this.resetTokenUsage();
     this.conversation = null;
     this.runtime.setConversation([]);
     await this.workspace.newWorkspace();
@@ -353,6 +373,66 @@ export class BackgroundOrchestrator {
       name: r.name,
     }));
   }
+
+  private async recordUsage(
+    usage: LLMUsage | undefined,
+    estimatedInputTokens: number,
+    estimatedOutputTokens: number,
+    contextLimitTokens: number,
+  ): Promise<void> {
+    const inputTokens = usage?.inputTokens ?? estimatedInputTokens;
+    const outputTokens = usage?.outputTokens ?? estimatedOutputTokens;
+    const cacheReported = usage?.cachedInputTokens !== undefined
+      || usage?.cacheMissTokens !== undefined
+      || usage?.cacheWriteTokens !== undefined;
+    const cachedInputTokens = usage?.cachedInputTokens ?? 0;
+    const cacheMissTokens = usage?.cacheMissTokens
+      ?? (cacheReported ? Math.max(0, inputTokens - cachedInputTokens) : 0);
+
+    this.tokenUsage = {
+      inputTokens: this.tokenUsage.inputTokens + inputTokens,
+      outputTokens: this.tokenUsage.outputTokens + outputTokens,
+      cachedInputTokens: this.tokenUsage.cachedInputTokens + cachedInputTokens,
+      cacheMissTokens: this.tokenUsage.cacheMissTokens + cacheMissTokens,
+      cacheWriteTokens: this.tokenUsage.cacheWriteTokens + (usage?.cacheWriteTokens ?? 0),
+      requestCount: this.tokenUsage.requestCount + 1,
+      cacheReportingRequests: this.tokenUsage.cacheReportingRequests + (cacheReported ? 1 : 0),
+      estimatedRequests: this.tokenUsage.estimatedRequests + (usage?.inputTokens === undefined || usage?.outputTokens === undefined ? 1 : 0),
+      lastContextTokens: inputTokens,
+      contextLimitTokens: contextLimitTokens || this.tokenUsage.contextLimitTokens,
+    };
+
+    if (this.conversation) {
+      this.conversation.tokenUsage = { ...this.tokenUsage };
+      this.conversation.updatedAt = Date.now();
+      await this.store.saveConversation(this.conversation);
+    }
+    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
+  }
+
+  private resetTokenUsage(): void {
+    this.tokenUsage = emptyTokenUsage(this.settings.provider.contextLimitTokens);
+    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
+  }
+}
+
+function emptyTokenUsage(contextLimitTokens: number): TokenUsageMetrics {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    cacheMissTokens: 0,
+    cacheWriteTokens: 0,
+    requestCount: 0,
+    cacheReportingRequests: 0,
+    estimatedRequests: 0,
+    lastContextTokens: 0,
+    contextLimitTokens,
+  };
+}
+
+function normalizeTokenUsage(usage: TokenUsageMetrics | undefined, contextLimitTokens: number): TokenUsageMetrics {
+  return { ...emptyTokenUsage(contextLimitTokens), ...(usage ?? {}), contextLimitTokens };
 }
 
 // Re-export helper so index.ts can build the registry once.

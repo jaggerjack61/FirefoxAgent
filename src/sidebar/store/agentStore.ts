@@ -13,6 +13,7 @@ import type {
   ConfirmationRequest,
   ConversationRecord,
   DevEvent,
+  TokenUsageMetrics,
   ToolActivityRecord,
   Workspace,
 } from "@/shared/types";
@@ -38,6 +39,7 @@ interface AgentState {
   streamingText: string;
   busy: boolean;
   activeTabId?: number;
+  tokenUsage: TokenUsageMetrics;
 
   setView(view: View): void;
   bootstrap(): Promise<void>;
@@ -79,6 +81,7 @@ const initialState: Omit<AgentState, keyof AgentStateActions | "applyEvent"> & {
   streamingText: "",
   busy: false,
   activeTabId: undefined,
+  tokenUsage: emptyTokenUsage(0),
   applyEvent: () => undefined,
 };
 
@@ -119,6 +122,9 @@ export const useAgentStore = create<AgentState>()((set, get) => {
       case "STREAM_DONE":
         set({ streamingText: "" });
         break;
+      case "TOKEN_USAGE_UPDATED":
+        set({ tokenUsage: event.usage });
+        break;
       case "MESSAGE_ADDED": {
         const message = event.message;
         set((s) => ({
@@ -147,7 +153,14 @@ export const useAgentStore = create<AgentState>()((set, get) => {
         set((s) => ({ actionLog: [...s.actionLog, event.entry].slice(-200) }));
         break;
       case "CONVERSATION_RESET":
-        set({ conversation: null, messages: [], activity: [], actionLog: [], streamingText: "" });
+        set((state) => ({
+          conversation: null,
+          messages: [],
+          activity: [],
+          actionLog: [],
+          streamingText: "",
+          tokenUsage: emptyTokenUsage(state.settings?.provider.contextLimitTokens ?? 0),
+        }));
         break;
       case "DEV_EVENT":
         if (get().settings?.devMode) {
@@ -190,6 +203,7 @@ export const useAgentStore = create<AgentState>()((set, get) => {
         pendingConfirmation: b.pendingConfirmation,
         hasSiteAccess: b.hasSiteAccess,
         activeTabId: b.activeTabId,
+        tokenUsage: b.tokenUsage,
         busy: b.runtimeState.status === "running" || b.runtimeState.status === "planning",
       });
     },
@@ -272,3 +286,18 @@ export const useAgentStore = create<AgentState>()((set, get) => {
     },
   };
 });
+
+function emptyTokenUsage(contextLimitTokens: number): TokenUsageMetrics {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    cacheMissTokens: 0,
+    cacheWriteTokens: 0,
+    requestCount: 0,
+    cacheReportingRequests: 0,
+    estimatedRequests: 0,
+    lastContextTokens: 0,
+    contextLimitTokens,
+  };
+}

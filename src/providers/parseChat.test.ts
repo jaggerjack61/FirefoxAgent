@@ -6,13 +6,20 @@ describe("parseChatCompletionResponse", () => {
   it("parses a plain text completion", () => {
     const resp: ChatCompletionsResponse = {
       choices: [{ message: { role: "assistant", content: "Hello world" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 10, completion_tokens: 3 },
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 3,
+        prompt_cache_hit_tokens: 6,
+        prompt_cache_miss_tokens: 4,
+      },
     };
     const parsed = parseChatCompletionResponse(resp);
     expect(parsed.content).toBe("Hello world");
     expect(parsed.toolCalls).toEqual([]);
     expect(parsed.finishReason).toBe("stop");
     expect(parsed.usage?.inputTokens).toBe(10);
+    expect(parsed.usage?.cachedInputTokens).toBe(6);
+    expect(parsed.usage?.cacheMissTokens).toBe(4);
   });
 
   it("parses tool calls with JSON arguments", () => {
@@ -76,11 +83,26 @@ describe("streaming accumulation", () => {
     const argsChunk = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(7) } }] } }] };
     accumulateChatChunk(acc, argsChunk);
     accumulateChatChunk(acc, { choices: [{ delta: {}, finish_reason: "tool_calls" }] });
+    accumulateChatChunk(acc, {
+      choices: [],
+      usage: {
+        prompt_tokens: 20,
+        completion_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 16, cache_write_tokens: 8 },
+      },
+    });
 
     const final = finalizeChatStream(acc);
     expect(final.content).toBe("Hello");
     expect(final.toolCalls).toHaveLength(1);
     expect(final.toolCalls[0].arguments).toEqual({ url: "https://x.com" });
     expect(final.finishReason).toBe("tool_calls");
+    expect(final.usage).toMatchObject({
+      inputTokens: 20,
+      outputTokens: 5,
+      cachedInputTokens: 16,
+      cacheMissTokens: 4,
+      cacheWriteTokens: 8,
+    });
   });
 });

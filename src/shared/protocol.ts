@@ -17,6 +17,7 @@ import type {
   ConfirmationRequest,
   ConversationRecord,
   DevEvent,
+  TokenUsageMetrics,
   ToolActivityRecord,
   Workspace,
 } from "./types";
@@ -61,6 +62,7 @@ export interface BootstrapPayload {
   pendingConfirmation: ConfirmationRequest | null;
   hasSiteAccess: boolean;
   activeTabId?: number;
+  tokenUsage: TokenUsageMetrics;
 }
 
 export type SidebarResponse =

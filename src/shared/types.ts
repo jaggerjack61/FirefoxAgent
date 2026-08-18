@@ -39,8 +39,16 @@ export interface LLMResponse {
   content: string | null;
   toolCalls: ToolCall[];
   finishReason: "stop" | "tool_calls" | "length" | "content_filter" | "error";
-  /** Approximate input/output token usage if reported by the API. */
-  usage?: { inputTokens?: number; outputTokens?: number };
+  /** Token and provider-cache usage when reported by the API. */
+  usage?: LLMUsage;
+}
+
+export interface LLMUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  cacheMissTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 export interface LLMRequest {
@@ -50,6 +58,10 @@ export interface LLMRequest {
   maxOutputTokens?: number;
   /** Ask the model to emit strict JSON only (structured-output fallback). */
   jsonMode?: boolean;
+  /** Stable conversation/session key used by providers for prompt-cache routing. */
+  cacheKey?: string;
+  /** Marks the leading system/developer content as a reusable cache prefix. */
+  cacheStablePrefix?: boolean;
 }
 
 export type StreamEvent =
@@ -270,6 +282,23 @@ export interface ConversationRecord {
   createdAt: number;
   updatedAt: number;
   messageIds: string[];
+  /** Aggregate provider usage for the conversation. */
+  tokenUsage?: TokenUsageMetrics;
+}
+
+/** Aggregate usage shown in the compact chat metrics bar. */
+export interface TokenUsageMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheMissTokens: number;
+  cacheWriteTokens: number;
+  requestCount: number;
+  cacheReportingRequests: number;
+  estimatedRequests: number;
+  /** Input/context tokens for the latest provider request. */
+  lastContextTokens: number;
+  contextLimitTokens: number;
 }
 
 export interface ToolActivityRecord {
@@ -292,7 +321,7 @@ export interface ToolActivityRecord {
 
 export type DevEvent =
   | { kind: "llm_request"; ts: number; messageCount: number; estimatedTokens: number; contextLayers: Record<string, number>; model: string }
-  | { kind: "llm_response"; ts: number; latencyMs: number; finishReason: string; estimatedTokens: number; toolCalls: number; iteration: number }
+  | { kind: "llm_response"; ts: number; latencyMs: number; finishReason: string; estimatedTokens: number; toolCalls: number; iteration: number; usage?: LLMUsage }
   | { kind: "tool_call"; ts: number; tool: string; input: unknown; output?: unknown; ok: boolean; latencyMs: number }
   | { kind: "context"; ts: number; layers: Record<string, number>; totalTokens: number; compressed: boolean }
   | { kind: "snapshot"; ts: number; tabId: number; url: string; elements: number; textChars: number }

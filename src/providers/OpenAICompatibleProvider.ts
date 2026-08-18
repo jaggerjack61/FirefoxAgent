@@ -116,16 +116,27 @@ export class OpenAICompatibleProvider implements LLMProvider {
   // -------------------------------------------------------------------------
 
   private async sendChatCompletions(request: LLMRequest, stream: boolean, opts?: SendOptions): Promise<LLMResponse> {
+    const officialOpenAI = isOfficialOpenAIEndpoint(this.config.baseUrl);
+    const explicitCache = officialOpenAI
+      && supportsExplicitPromptCaching(this.config.model)
+      && request.cacheStablePrefix === true;
+    const normalizedMessages = normalizeChatCompletionHistory(request.messages);
     const body: ChatCompletionsRequest = {
       model: this.config.model,
       ...(supportsReasoningEffort(this.config.model) ? { reasoning_effort: this.config.reasoningEffort } : {}),
       // Conversation compression or restored legacy data can split an
       // assistant/tool-call group. Strict providers reject those orphaned
       // tool results, so repair the history at the final wire boundary.
-      messages: normalizeChatCompletionHistory(request.messages).map(toChatMessage),
+      messages: normalizedMessages.map((message) => toChatMessage(
+        message,
+        explicitCache && message.role === "system",
+      )),
       temperature: request.temperature ?? this.config.temperature,
       max_tokens: request.maxOutputTokens ?? this.config.maxOutputTokens,
       stream,
+      ...(stream && supportsStreamUsage(this.config.baseUrl) ? { stream_options: { include_usage: true } } : {}),
+      ...(officialOpenAI && request.cacheKey ? { prompt_cache_key: request.cacheKey } : {}),
+      ...(explicitCache ? { prompt_cache_options: { mode: "implicit" as const, ttl: "30m" as const } } : {}),
       ...(request.tools?.length ? { tools: request.tools as ChatCompletionsRequest["tools"], tool_choice: "auto" as const } : {}),
       ...(request.jsonMode ? { response_format: { type: "json_object" as const } } : {}),
     };
@@ -159,19 +170,34 @@ export class OpenAICompatibleProvider implements LLMProvider {
   // -------------------------------------------------------------------------
 
   private async sendResponses(request: LLMRequest, stream: boolean, opts?: SendOptions): Promise<LLMResponse> {
+    const officialOpenAI = isOfficialOpenAIEndpoint(this.config.baseUrl);
+    const explicitCache = officialOpenAI
+      && supportsExplicitPromptCaching(this.config.model)
+      && request.cacheStablePrefix === true;
     const systemIdx = request.messages.findIndex((m) => m.role === "system");
     const instructions = systemIdx !== -1 ? request.messages[systemIdx].content : "";
-    const input: ResponsesInputItem[] = request.messages
-      .filter((m) => m.role !== "system")
-      .map((m) => {
-        if (m.role === "tool") {
-          return { type: "function_call_output" as const, call_id: m.toolCallId ?? "call", output: m.content ?? "" };
+    const input: ResponsesInputItem[] = request.messages.flatMap((m): ResponsesInputItem[] => {
+        if (m.role === "system") {
+          return explicitCache
+            ? [{
+                type: "message" as const,
+                role: "developer" as const,
+                content: [{
+                  type: "input_text" as const,
+                  text: m.content ?? "",
+                  prompt_cache_breakpoint: { mode: "explicit" as const },
+                }],
+              }]
+            : [];
         }
-        return {
+        if (m.role === "tool") {
+          return [{ type: "function_call_output" as const, call_id: m.toolCallId ?? "call", output: m.content ?? "" }];
+        }
+        return [{
           type: "message" as const,
           role: m.role,
           content: [{ type: "input_text" as const, text: m.content ?? "" }],
-        };
+        }];
       });
 
     const body: ResponsesRequest = {
@@ -181,7 +207,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
       temperature: request.temperature ?? this.config.temperature,
       max_output_tokens: request.maxOutputTokens ?? this.config.maxOutputTokens,
       stream,
-      ...(instructions ? { instructions } : {}),
+      ...(!explicitCache && instructions ? { instructions } : {}),
+      ...(officialOpenAI && request.cacheKey ? { prompt_cache_key: request.cacheKey } : {}),
+      ...(explicitCache ? { prompt_cache_options: { mode: "implicit" as const, ttl: "30m" as const } } : {}),
       ...(request.tools?.length
         ? {
             tools: request.tools.map((t) => ({
@@ -249,7 +277,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }
 }
 
-function toChatMessage(m: LLMRequest["messages"][number]): ChatCompletionsMessage {
+function toChatMessage(m: LLMRequest["messages"][number], cacheBreakpoint = false): ChatCompletionsMessage {
   if (m.role === "assistant" && m.toolCalls?.length) {
     return {
       role: "assistant",
@@ -264,7 +292,14 @@ function toChatMessage(m: LLMRequest["messages"][number]): ChatCompletionsMessag
   if (m.role === "tool") {
     return { role: "tool", content: m.content ?? "", tool_call_id: m.toolCallId };
   }
-  return { role: m.role, content: m.content ?? "", tool_call_id: m.toolCallId, name: m.name };
+  return {
+    role: m.role,
+    content: cacheBreakpoint
+      ? [{ type: "text", text: m.content ?? "", prompt_cache_breakpoint: { mode: "explicit" } }]
+      : (m.content ?? ""),
+    tool_call_id: m.toolCallId,
+    name: m.name,
+  };
 }
 
 /**
@@ -332,6 +367,32 @@ async function providerErrorDetail(response: Response): Promise<string> {
 /** OpenAI-style reasoning controls are rejected by many compatible APIs. */
 function supportsReasoningEffort(model: string): boolean {
   return /^(?:gpt-5(?:[.\-]|$)|o[1-9](?:[.\-]|$)|.*codex(?:[.\-]|$))/i.test(model);
+}
+
+function isOfficialOpenAIEndpoint(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === "api.openai.com";
+  } catch {
+    return false;
+  }
+}
+
+function supportsStreamUsage(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === "api.openai.com" || host === "api.deepseek.com" || host.endsWith(".deepseek.com");
+  } catch {
+    return false;
+  }
+}
+
+/** GPT-5.6 and later use explicit prompt-cache breakpoints. */
+function supportsExplicitPromptCaching(model: string): boolean {
+  const match = model.toLowerCase().match(/^gpt-(\d+)(?:\.(\d+))?/);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 6);
 }
 
 /** Parses a structured-output fallback payload from non-tool models. */

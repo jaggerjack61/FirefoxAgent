@@ -9,6 +9,7 @@ import type {
   ChatMessageRecord,
   ConfirmationRequest,
   DevEvent,
+  TokenUsageMetrics,
   ToolActivityRecord,
   Workspace,
 } from "./types";
@@ -17,6 +18,7 @@ export type BackgroundEvent =
   | { type: "AGENT_STATE"; state: AgentRuntimeState }
   | { type: "STREAM_DELTA"; text: string }
   | { type: "STREAM_DONE" }
+  | { type: "TOKEN_USAGE_UPDATED"; usage: TokenUsageMetrics }
   | { type: "MESSAGE_ADDED"; message: ChatMessageRecord }
   | { type: "ACTIVITY"; activity: ToolActivityRecord }
   | { type: "ACTIVITY_UPDATED"; activity: ToolActivityRecord }

@@ -179,3 +179,108 @@ describe("OpenAICompatibleProvider errors and tool history", () => {
     expect(body.messages[2]).toMatchObject({ role: "user", content: "continue" });
   });
 });
+
+describe("OpenAICompatibleProvider prompt caching", () => {
+  it("sends a cache key and explicit system breakpoint for GPT-5.6 Chat Completions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new OpenAICompatibleProvider({
+      ...config,
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-5.6-sol",
+    });
+    await provider.send({
+      messages: [
+        { role: "system", content: "Stable system instructions" },
+        { role: "user", content: "Hello" },
+      ],
+      cacheKey: "browser-agent-v1:conv_1",
+      cacheStablePrefix: true,
+    });
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as Record<string, any>;
+    expect(body.prompt_cache_key).toBe("browser-agent-v1:conv_1");
+    expect(body.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
+    expect(body.messages[0].content[0]).toMatchObject({
+      type: "text",
+      text: "Stable system instructions",
+      prompt_cache_breakpoint: { mode: "explicit" },
+    });
+  });
+
+  it("uses a developer input block for a Responses API cache breakpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ output: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new OpenAICompatibleProvider({
+      ...config,
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-5.6-terra",
+      protocol: "responses",
+    });
+    await provider.send({
+      messages: [
+        { role: "system", content: "Stable system instructions" },
+        { role: "user", content: "Hello" },
+      ],
+      cacheKey: "browser-agent-v1:conv_2",
+      cacheStablePrefix: true,
+    });
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as Record<string, any>;
+    expect(body.instructions).toBeUndefined();
+    expect(body.prompt_cache_key).toBe("browser-agent-v1:conv_2");
+    expect(body.input[0]).toMatchObject({
+      type: "message",
+      role: "developer",
+      content: [{
+        type: "input_text",
+        text: "Stable system instructions",
+        prompt_cache_breakpoint: { mode: "explicit" },
+      }],
+    });
+  });
+
+  it("requests streamed usage from DeepSeek without sending OpenAI cache controls", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+      'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":2,"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20}}',
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(sse, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new OpenAICompatibleProvider(config);
+    const response = await provider.send(
+      {
+        messages: [{ role: "user", content: "Hello" }],
+        cacheKey: "browser-agent-v1:conv_3",
+        cacheStablePrefix: true,
+      },
+      { onStream: vi.fn() },
+    );
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>;
+    expect(body.stream_options).toEqual({ include_usage: true });
+    expect(body).not.toHaveProperty("prompt_cache_key");
+    expect(body).not.toHaveProperty("prompt_cache_options");
+    expect(response.usage).toMatchObject({ cachedInputTokens: 80, cacheMissTokens: 20 });
+  });
+});

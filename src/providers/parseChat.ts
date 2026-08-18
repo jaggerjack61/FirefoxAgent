@@ -3,14 +3,15 @@
  * non-streamed), including recovery from malformed tool-call arguments.
  */
 
-import type { LLMResponse, ToolCall } from "@/shared/types";
+import type { LLMResponse, LLMUsage, ToolCall } from "@/shared/types";
 import { ToolError } from "@/shared/errors";
-import type { ChatCompletionsChunk, ChatCompletionsResponse, ChatCompletionsToolCall } from "./wireTypes";
+import type { ChatCompletionsChunk, ChatCompletionsResponse, ChatCompletionsToolCall, ChatCompletionsUsage } from "./wireTypes";
 
 export interface ChatStreamAccumulator {
   text: string;
   toolCalls: Map<number, { id?: string; name?: string; args: string }>;
   finishReason: string;
+  usage?: LLMUsage;
 }
 
 export function createChatStreamAccumulator(): ChatStreamAccumulator {
@@ -19,6 +20,7 @@ export function createChatStreamAccumulator(): ChatStreamAccumulator {
 
 /** Accumulates one SSE chunk into the accumulator. */
 export function accumulateChatChunk(acc: ChatStreamAccumulator, chunk: ChatCompletionsChunk): void {
+  if (chunk.usage) acc.usage = parseChatUsage(chunk.usage);
   const choice = chunk.choices?.[0];
   if (!choice) return;
   const { delta, finish_reason } = choice;
@@ -94,9 +96,7 @@ export function parseChatCompletionResponse(data: ChatCompletionsResponse): LLMR
     content: Array.isArray(content) ? content.map((c) => c.text).join("") : (content ?? null),
     toolCalls: toToolCalls(choice.message.tool_calls),
     finishReason: finishMapping[choice.finish_reason] ?? "stop",
-    usage: data.usage
-      ? { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens }
-      : undefined,
+    usage: parseChatUsage(data.usage),
   };
 }
 
@@ -113,5 +113,22 @@ export function finalizeChatStream(acc: ChatStreamAccumulator): LLMResponse {
     content: acc.text || null,
     toolCalls,
     finishReason: finishMapping[acc.finishReason] ?? (toolCalls.length ? "tool_calls" : "stop"),
+    usage: acc.usage,
+  };
+}
+
+function parseChatUsage(usage: ChatCompletionsUsage | undefined): LLMUsage | undefined {
+  if (!usage) return undefined;
+  const cachedInputTokens = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens;
+  const cacheMissTokens = usage.prompt_cache_miss_tokens
+    ?? (usage.prompt_tokens !== undefined && cachedInputTokens !== undefined
+      ? Math.max(0, usage.prompt_tokens - cachedInputTokens)
+      : undefined);
+  return {
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    cachedInputTokens,
+    cacheMissTokens,
+    cacheWriteTokens: usage.prompt_tokens_details?.cache_write_tokens,
   };
 }
