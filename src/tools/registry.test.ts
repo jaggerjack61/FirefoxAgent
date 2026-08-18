@@ -22,6 +22,7 @@ describe("ToolRegistry", () => {
     expect(names).toContain("get_workspace_tabs");
     expect(names).toContain("search_web");
     expect(names).toContain("download_file");
+    expect(names).toContain("wait");
     expect(new Set(names).size).toBe(names.length);
   });
 
@@ -99,6 +100,33 @@ describe("ToolRegistry", () => {
       options: { filename: "videos/demo.mp4", saveAs: false, conflictAction: "uniquify" },
     }]);
     expect(output).toMatchObject({ downloadId: 1, requestedFilename: "videos/demo.mp4" });
+  });
+
+  it("waits locally for a bounded timer and returns its timing metadata", async () => {
+    const startedAt = Date.now();
+    const output = await createToolRegistry().executeCall("wait", { seconds: 0.02, reason: "download countdown" }, context) as {
+      waitedSeconds: number;
+      elapsedMs: number;
+      reason: string;
+    };
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(15);
+    expect(output).toMatchObject({ waitedSeconds: 0.02, reason: "download countdown" });
+    expect(output.elapsedMs).toBeGreaterThanOrEqual(15);
+  });
+
+  it("cancels a wait when the agent is stopped", async () => {
+    const controller = new AbortController();
+    const pending = createToolRegistry().executeCall("wait", { seconds: 0.2 }, { ...context, signal: controller.signal });
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(pending).rejects.toMatchObject({ code: "AGENT_STOPPED" });
+  });
+
+  it("rejects waits outside the safe duration bounds", () => {
+    const registry = createToolRegistry();
+    expect(() => registry.validateCall("wait", { seconds: 0 })).toThrow(ToolError);
+    expect(() => registry.validateCall("wait", { seconds: 301 })).toThrow(ToolError);
   });
 
   it("rejects non-web download URLs and unsafe filenames", () => {

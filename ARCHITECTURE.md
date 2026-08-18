@@ -63,7 +63,7 @@ shared  ←  security  ←  tools  ←  agent  ←  background
 - validation (`validateCall` — model output is never trusted)
 - execution (`executeCall` with a typed `ToolContext`)
 
-The registry keeps a stable model-visible tool catalog on every request so the system-and-tools prompt prefix remains cacheable. Trusted runtime scope guards still reject cross-tab operations unless the user explicitly requested that scope. `download_file` delegates HTTP(S) transfers of any MIME type to Firefox's download manager, so large files never enter agent memory. Overlapping legacy aliases remain executable but are hidden from the model.
+The registry keeps a stable model-visible tool catalog on every request so the system-and-tools prompt prefix remains cacheable. Trusted runtime scope guards still reject cross-tab operations unless the user explicitly requested that scope. The local `wait` tool sleeps inside the extension for bounded website timers and returns before the next model turn; no provider request is made during the delay. `download_file` delegates HTTP(S) transfers of any MIME type to Firefox's download manager, so large files never enter agent memory. Overlapping legacy aliases remain executable but are hidden from the model.
 
 ### `src/agent` — the runtime
 - `AgentRuntime.run(userText)` implements the loop:

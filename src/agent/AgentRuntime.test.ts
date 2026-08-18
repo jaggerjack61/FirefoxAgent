@@ -534,6 +534,33 @@ describe("AgentRuntime — provider-compatible tool history", () => {
     expect(secondRequest).toContain("Page is ready now");
   });
 
+  it("does not call the provider while the wait tool is sleeping", async () => {
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "wait", { seconds: 0.1, reason: "download countdown" })], finishReason: "tool_calls" },
+      finalResponse("The timer finished; I can continue."),
+    ]);
+    const sendTimes: number[] = [];
+    const originalSend = harness.provider.send.bind(harness.provider);
+    harness.provider.send = async (request, options) => {
+      sendTimes.push(Date.now());
+      return originalSend(request, options);
+    };
+
+    const result = await harness.runtime.run("Wait for the download timer, then continue.");
+
+    expect(result.finalText).toBe("The timer finished; I can continue.");
+    expect(sendTimes).toHaveLength(2);
+    expect(sendTimes[1] - sendTimes[0]).toBeGreaterThanOrEqual(80);
+    expect(harness.events).toContainEqual(expect.objectContaining({
+      type: "ACTIVITY",
+      activity: expect.objectContaining({
+        tool: "wait",
+        status: "running",
+        detail: expect.stringContaining("no model requests are sent"),
+      }),
+    }));
+  });
+
   it("reports provider cache usage and context size", async () => {
     const harness = createHarness([{
       ...finalResponse("Done."),

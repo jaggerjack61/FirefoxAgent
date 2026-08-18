@@ -54,6 +54,7 @@ import {
 import { extractTableTool, extractListTool, extractLinksTool, extractStructuredContentTool } from "./extractionTools";
 import { navigateTool, searchWebTool } from "./navigationTools";
 import { downloadFileTool } from "./downloadTools";
+import { waitTool } from "./timingTools";
 import {
   getWorkspaceTabsTool,
   getWorkspaceMemoryTool,
@@ -124,6 +125,9 @@ export function createToolRegistry(): ToolRegistry {
 
   // Downloads
   registry.register(downloadFileTool);
+
+  // Local timing
+  registry.register(waitTool);
 
   // Workspace & memory
   registry.register(getWorkspaceTabsTool);

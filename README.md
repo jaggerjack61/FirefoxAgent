@@ -17,6 +17,7 @@ Works with **any OpenAI-compatible API** (OpenAI, DeepSeek, Ollama, LM Studio, v
 - **Stable element IDs** (`[3] link "Pricing"` → `click_element(3)`) with semantic re-matching when the DOM changes
 - **Reliable interactions** with auto-waiting for visible, enabled, editable, stable and unobscured controls before click/fill actions
 - **Token-free page waiting** — loading timeouts are retried locally and do not trigger repeated LLM requests while page state is unchanged
+- **Local timer waits** — the agent can pause for a bounded website countdown before continuing to the next browser action, with no LLM traffic during the delay
 - **Direct downloads** of images, videos, audio, documents, archives, text, and other HTTP(S) resources through Firefox's download manager, with approval bypassed only in YOLO mode
 - **Prompt-injection defense** — web content is wrapped as untrusted data; the LLM can never be hijacked by a page
 - **Three behavior modes** — Interactive asks before meaningful actions, Agent automates low-risk actions, and YOLO explicitly disables all confirmations

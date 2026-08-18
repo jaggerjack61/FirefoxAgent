@@ -506,6 +506,10 @@ export class AgentRuntime {
     const activityId = newId("act");
     const label = this.describeCall(call);
     this.emitActivity(activityId, "running", call.name, label, t0);
+    if (call.name === "wait") {
+      const seconds = typeof call.arguments.seconds === "number" ? call.arguments.seconds : "requested";
+      this.emitActivity(activityId, "running", call.name, label, t0, `Waiting locally for ${seconds} seconds; no model requests are sent.`);
+    }
 
     try {
       if (call.name === "reload_tab" && !this.reloadIsJustified()) {
@@ -770,6 +774,8 @@ export class AgentRuntime {
         return `Close tab ${pretty(args.tabId ?? "")}`;
       case "search_web":
         return `Search for "${pretty(args.query ?? "")}"`;
+      case "wait":
+        return `Wait ${pretty(args.seconds ?? "")} seconds`;
       case "get_page_snapshot":
       case "get_page_text":
         return "Read current page";
