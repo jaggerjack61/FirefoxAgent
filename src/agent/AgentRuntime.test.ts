@@ -687,6 +687,75 @@ describe("AgentRuntime — provider-compatible tool history", () => {
   });
 });
 
+describe("AgentRuntime — active tab token efficiency", () => {
+  it("skips re-injecting the active-tab block when the page is unchanged", async () => {
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "get_page_snapshot", {})], finishReason: "tool_calls" },
+      finalResponse("Done."),
+    ], {
+      tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
+      pages: { 1: makeSnapshot("https://current.test", "Current", [], "Current page text") },
+    });
+
+    await harness.runtime.run("Read this page");
+
+    const [first, second] = harness.provider.requests;
+    // The first request carries the full page block.
+    expect(first.messages.at(-1)?.content).toContain("PAGE TEXT");
+    expect(first.messages.at(-1)?.content).toContain("Current page text");
+    // The second request replaces it with a stub…
+    expect(second.messages.at(-1)?.content).toContain("page unchanged since the previous step");
+    expect(second.messages.at(-1)?.content).not.toContain("Current page text");
+    // …while the earlier full block remains available in history.
+    expect(second.messages.map((m) => m.content ?? "").join("\n")).toContain("Current page text");
+  });
+
+  it("re-injects the active-tab block when the snapshot version changes", async () => {
+    const snapshot = makeSnapshot("https://current.test", "Current", [], "First version");
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "get_page_snapshot", {})], finishReason: "tool_calls" },
+      finalResponse("Done."),
+    ], {
+      tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
+      pages: { 1: snapshot },
+    });
+    let calls = 0;
+    harness.gateway.getSnapshot = vi.fn(async () => {
+      calls += 1;
+      // The third call happens on the second iteration's context build.
+      return calls >= 3 ? { ...snapshot, version: 2, text: "Second version" } : snapshot;
+    });
+
+    await harness.runtime.run("Read this page");
+
+    const [, second] = harness.provider.requests;
+    expect(second.messages.at(-1)?.content).toContain("Second version");
+    expect(second.messages.at(-1)?.content).not.toContain("page unchanged");
+  });
+
+  it("re-injects the full block after history is re-seeded with new message objects", async () => {
+    const harness = createHarness([
+      { content: null, toolCalls: [toolCall("c1", "get_page_snapshot", {})], finishReason: "tool_calls" },
+      finalResponse("Done."),
+    ], {
+      tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
+      pages: { 1: makeSnapshot("https://current.test", "Current", [], "Current page text") },
+    });
+
+    await harness.runtime.run("Read this page");
+    // Simulate a fresh task: the orchestrator re-seeds history from storage.
+    harness.runtime.setConversation(harness.provider.requests[0].messages.slice(1).map((m) => ({ ...m })));
+    harness.provider.script.push(finalResponse("Done again."));
+    await harness.runtime.run("Read it again");
+
+    const third = harness.provider.requests.at(-1)!;
+    // Re-hydrated messages are new objects, so the tracker misses and the
+    // full page block must be injected again.
+    expect(third.messages.at(-1)?.content).toContain("Current page text");
+    expect(third.messages.at(-1)?.content).not.toContain("page unchanged");
+  });
+});
+
 describe("AgentRuntime — cross-tab action (spec §42 scenario 5)", () => {
   it("copies a reference number from one tab into a form in another", async () => {
     const pages = {

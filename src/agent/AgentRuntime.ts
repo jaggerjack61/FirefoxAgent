@@ -83,6 +83,12 @@ interface ToolExecutionResult {
 export class AgentRuntime {
   private abortController: AbortController | null = null;
   private conversation: LLMMessage[] = [];
+  /**
+   * The last full active-tab block injected into the conversation. When the
+   * page snapshot version is unchanged and that message is still in the
+   * verbatim window, the block is replaced by a stub to save tokens.
+   */
+  private lastActiveTabContext: { tabId: number; version: number; message: LLMMessage } | null = null;
 
   constructor(private readonly deps: AgentRuntimeDeps) {}
 
@@ -97,6 +103,9 @@ export class AgentRuntime {
   /** Seeds runtime with persisted conversation messages. */
   setConversation(messages: LLMMessage[]): void {
     this.conversation = messages;
+    // Re-hydrated messages are new objects; the previous block reference is
+    // gone, so the next turn must inject the full block again.
+    this.lastActiveTabContext = null;
   }
 
   getConversation(): LLMMessage[] {
@@ -360,7 +369,21 @@ export class AgentRuntime {
     const taskBlock = this.deps.tasks.renderForModel();
     const memoryBlock = await this.renderMemory(settings);
     let workspaceBlock = [this.deps.workspace.renderForModel(settings.limits.maxTabsInspected), memoryBlock].filter(Boolean).join("\n\n");
-    let activeTabBlock = await this.renderActiveTab(settings);
+    const activeTab = await this.renderActiveTab(settings);
+    let activeTabBlock = activeTab.block;
+    let activeTabSkipped = false;
+    if (activeTab.tabId !== undefined && activeTab.version !== undefined) {
+      const prev = this.lastActiveTabContext;
+      // Skip re-injecting the page block when the snapshot is unchanged and
+      // the previous full block is still present in the conversation.
+      if (prev && prev.tabId === activeTab.tabId && prev.version === activeTab.version && this.conversation.includes(prev.message)) {
+        activeTabSkipped = true;
+        activeTabBlock = [
+          "ACTIVE TAB: (page unchanged since the previous step — the full snapshot is in the conversation above; not re-sent to save tokens)",
+          activeTab.networkIdle === false ? "Network: background page APIs are still active (bounded wait elapsed)" : "",
+        ].filter(Boolean).join("\n");
+      }
+    }
 
     const budget = new TokenBudget(settings);
     const compression = budget.planCompression({
@@ -405,6 +428,13 @@ export class AgentRuntime {
     });
     this.conversation = conv.messages;
 
+    // Record the injected block only when it is a full snapshot; stubs do not
+    // extend the tracker, so an unchanged page followed by a dropped message
+    // still re-injects once the previous block leaves the window.
+    if (!activeTabSkipped && activeTab.tabId !== undefined && activeTab.version !== undefined) {
+      this.lastActiveTabContext = { tabId: activeTab.tabId, version: activeTab.version, message: runtimeContext };
+    }
+
     const messages: LLMMessage[] = [
       { role: "system", content: systemPrompt },
       ...conv.messages,
@@ -428,6 +458,7 @@ export class AgentRuntime {
       layers: layerTokens,
       totalTokens,
       compressed: !!conv.compressedSummary || compression.dropActiveTabText || compression.factsOnlyWorkspace,
+      activeTabSkipped,
     });
 
     return { messages, toolDefs, totalTokens, layerTokens };
@@ -448,14 +479,14 @@ export class AgentRuntime {
     }
   }
 
-  private async renderActiveTab(settings: AppSettings): Promise<string> {
+  private async renderActiveTab(settings: AppSettings): Promise<{ block: string; tabId?: number; version?: number; networkIdle?: boolean }> {
     try {
       const active = await this.deps.gateway.getActiveTab();
       if (!active || !active.url || /^(about|moz-extension|chrome|file|data):/.test(active.url)) {
-        return "ACTIVE TAB: (no web page)";
+        return { block: "ACTIVE TAB: (no web page)" };
       }
       if (!settings.privacy.allowActivePageContent) {
-        return `ACTIVE TAB:\nTitle: ${active.title}\nURL: ${active.url}\n(page content sharing disabled)`;
+        return { block: `ACTIVE TAB:\nTitle: ${active.title}\nURL: ${active.url}\n(page content sharing disabled)` };
       }
       const snap = await this.deps.gateway.getSnapshot(active.id, {
         maxTextChars: settings.limits.maxPageTextChars,
@@ -464,36 +495,43 @@ export class AgentRuntime {
         includeValues: false,
         includeFrames: true,
       });
-      return renderActiveTabContext({
+      return {
+        block: renderActiveTabContext({
+          tabId: active.id,
+          url: snap.url,
+          title: snap.title,
+          elements: snap.elements
+            .filter((e) => e.visible && (e.clickable !== true || e.actionable !== false))
+            .map((e) => ({
+              id: e.id,
+              role: e.role,
+              name: e.name,
+              enabled: e.enabled,
+              clickable: e.clickable,
+              actionable: e.actionable,
+            })),
+          text: snap.text,
+          headings: snap.headings,
+          networkIdle: snap.networkIdle,
+        }),
         tabId: active.id,
-        url: snap.url,
-        title: snap.title,
-        elements: snap.elements
-          .filter((e) => e.visible && (e.clickable !== true || e.actionable !== false))
-          .map((e) => ({
-            id: e.id,
-            role: e.role,
-            name: e.name,
-            enabled: e.enabled,
-            clickable: e.clickable,
-            actionable: e.actionable,
-          })),
-        text: snap.text,
-        headings: snap.headings,
+        version: snap.version,
         networkIdle: snap.networkIdle,
-      });
+      };
     } catch (err) {
       if (err instanceof ToolError && err.code === "NAVIGATION_TIMEOUT") {
         const active = await this.deps.gateway.getActiveTab().catch(() => null);
-        return [
-          "ACTIVE TAB:",
-          active ? `Tab ID: ${active.id}` : "",
-          active?.title ? `Title: ${active.title}` : "",
-          active?.url ? `URL: ${active.url}` : "",
-          "Status: loading or waiting for page API responses (reads and interactions wait for network idle automatically)",
-        ].filter(Boolean).join("\n");
+        return {
+          block: [
+            "ACTIVE TAB:",
+            active ? `Tab ID: ${active.id}` : "",
+            active?.title ? `Title: ${active.title}` : "",
+            active?.url ? `URL: ${active.url}` : "",
+            "Status: loading or waiting for page API responses (reads and interactions wait for network idle automatically)",
+          ].filter(Boolean).join("\n"),
+        };
       }
-      return "ACTIVE TAB: (cannot inspect — content script unavailable or permission missing)";
+      return { block: "ACTIVE TAB: (cannot inspect — content script unavailable or permission missing)" };
     }
   }
 

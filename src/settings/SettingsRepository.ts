@@ -32,7 +32,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   limits: {
     maxActionsPerTask: 25,
     maxTabsInspected: 8,
-    maxPageTextChars: 12_000,
+    // 6k chars ≈ 1.5k tokens of page text per snapshot — enough for
+    // headlines, key paragraphs, and navigation cues without dominating
+    // the context window on every turn.
+    maxPageTextChars: 6_000,
     maxSnapshotElements: 120,
     taskTimeoutMs: 10 * 60_000,
   },

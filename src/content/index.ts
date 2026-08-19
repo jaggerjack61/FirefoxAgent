@@ -22,7 +22,7 @@ interface SnapshotOptions {
 }
 
 const DEFAULTS: SnapshotOptions = {
-  maxTextChars: 12_000,
+  maxTextChars: 6_000,
   maxElements: 120,
   maxLinks: 200,
   includeValues: false,

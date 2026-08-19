@@ -74,6 +74,42 @@ describe("buildConversationLayer", () => {
     expect(result.messages.length).toBe(1 + 8);
     expect(result.messages[0].content).toContain("Earlier conversation summary");
   });
+
+  it("truncates oversized tool outputs kept in the recent window", () => {
+    const messages: LLMMessage[] = [];
+    for (let i = 0; i < 30; i++) {
+      messages.push({ role: "user", content: `msg ${i}` });
+      messages.push({ role: "assistant", content: `reply ${i}` });
+    }
+    messages.push({ role: "tool", content: "x".repeat(10_000), toolCallId: "t1", name: "get_page_text" });
+    const result = buildConversationLayer(messages, { keepRecent: 8, summarizeThreshold: 24 });
+    const toolMsg = result.messages.find((m) => m.role === "tool")!;
+    expect(toolMsg.content!.length).toBeLessThan(5_000);
+    expect(toolMsg.content).toContain("[tool output truncated");
+    // Non-tool messages in the recent window stay verbatim.
+    expect(result.messages.filter((m) => m.role === "user").map((m) => m.content)).toContain("msg 29");
+  });
+
+  it("keeps small tool outputs verbatim in the recent window", () => {
+    const messages: LLMMessage[] = [];
+    for (let i = 0; i < 30; i++) {
+      messages.push({ role: "user", content: `msg ${i}` });
+      messages.push({ role: "assistant", content: `reply ${i}` });
+    }
+    messages.push({ role: "tool", content: "Clicked E3.", toolCallId: "t1", name: "click_element" });
+    const result = buildConversationLayer(messages, { keepRecent: 8, summarizeThreshold: 24 });
+    expect(result.messages.find((m) => m.role === "tool")!.content).toBe("Clicked E3.");
+  });
+
+  it("leaves short conversations untouched (no truncation below threshold)", () => {
+    const messages: LLMMessage[] = [
+      { role: "user", content: "hi" },
+      { role: "tool", content: "y".repeat(9_000), toolCallId: "t1", name: "get_page_text" },
+    ];
+    const result = buildConversationLayer(messages, { keepRecent: 8, summarizeThreshold: 24 });
+    expect(result.messages).toBe(messages);
+    expect(result.messages[1].content).toHaveLength(9_000);
+  });
 });
 
 describe("buildSystemPrompt", () => {

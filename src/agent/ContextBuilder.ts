@@ -84,19 +84,38 @@ export interface ConversationLayerResult {
   totalTokens: number;
 }
 
+export interface ConversationLayerOptions {
+  keepRecent: number;
+  summarizeThreshold: number;
+  /**
+   * Tool observations longer than this (chars) are truncated when they are
+   * kept in the recent window. Large page reads stay in history only once;
+   * repeated copies are compacted. Only applies once the conversation is
+   * over the summarize threshold (the compression path).
+   */
+  maxToolOutputChars?: number;
+}
+
+/** Default cap for tool observations retained verbatim in the recent window. */
+export const MAX_RECENT_TOOL_OUTPUT_CHARS = 4_000;
+
 /**
  * Builds the conversation layer: recent messages verbatim, older messages
- * collapsed into one summary message when over the threshold.
+ * collapsed into one summary message when over the threshold. Tool
+ * observations in the recent window are truncated past the cap so repeated
+ * page reads do not accumulate verbatim copies.
  */
 export function buildConversationLayer(
   messages: LLMMessage[],
-  opts: { keepRecent: number; summarizeThreshold: number },
+  opts: ConversationLayerOptions,
 ): ConversationLayerResult {
   const { keepRecent, summarizeThreshold } = opts;
   if (messages.length <= summarizeThreshold) {
     return { messages, totalTokens: sumMessageTokens(messages) };
   }
-  const recent = messages.slice(-keepRecent);
+  const recent = messages
+    .slice(-keepRecent)
+    .map((m) => truncateToolOutput(m, opts.maxToolOutputChars ?? MAX_RECENT_TOOL_OUTPUT_CHARS));
   const older = messages.slice(0, messages.length - keepRecent);
   const summary = summarizeConversation(older);
   const summaryMsg: LLMMessage = {
@@ -108,6 +127,15 @@ export function buildConversationLayer(
     messages: result,
     compressedSummary: summary,
     totalTokens: sumMessageTokens(result),
+  };
+}
+
+/** Truncates oversized tool observations so they do not stay verbatim in the recent window. */
+function truncateToolOutput(message: LLMMessage, maxChars: number): LLMMessage {
+  if (message.role !== "tool" || !message.content || message.content.length <= maxChars) return message;
+  return {
+    ...message,
+    content: `${message.content.slice(0, maxChars)}\n… [tool output truncated to save context; key facts are preserved in workspace notes]`,
   };
 }
 
