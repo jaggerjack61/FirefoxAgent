@@ -58,6 +58,13 @@ export interface RegisteredTool {
 
 export class ToolRegistry {
   private readonly tools = new Map<string, RegisteredTool>();
+  /**
+   * Memoized LLM tool definitions for the default (all-tools) case. The
+   * registry is immutable after construction, so the byte-stable serialized
+   * form is computed once and reused across every request — this keeps the
+   * prompt-cache prefix identical turn over turn.
+   */
+  private cachedToolDefs: LLMToolDef[] | null = null;
 
   register<TInput, TOutput>(tool: AgentTool<TInput, TOutput>): void {
     if (this.tools.has(tool.name)) {
@@ -71,6 +78,9 @@ export class ToolRegistry {
       execute: (input: unknown, ctx: ToolContext) => tool.execute(input as TInput, ctx),
     };
     this.tools.set(tool.name, registered);
+    // Invalidate the memo in case register is called after a first lookup
+    // (e.g. in tests); normal construction registers all tools up front.
+    this.cachedToolDefs = null;
   }
 
   has(name: string): boolean {
@@ -117,7 +127,17 @@ export class ToolRegistry {
 
   /** LLM-facing tool definitions (function-calling format). */
   llmToolDefs(allowedNames?: Iterable<string>): LLMToolDef[] {
-    const allowed = allowedNames ? new Set(allowedNames) : null;
+    // Fast path: the default (all-tools) catalog is memoized so the exact
+    // same bytes are returned every turn — critical for prompt-cache hits.
+    if (!allowedNames) {
+      if (this.cachedToolDefs) return this.cachedToolDefs;
+      this.cachedToolDefs = this.buildToolDefs(null);
+      return this.cachedToolDefs;
+    }
+    return this.buildToolDefs(new Set(allowedNames));
+  }
+
+  private buildToolDefs(allowed: Set<string> | null): LLMToolDef[] {
     return this.exposedNames()
       .filter((name) => !allowed || allowed.has(name))
       .sort()

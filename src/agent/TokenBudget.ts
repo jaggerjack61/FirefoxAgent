@@ -4,8 +4,8 @@
  * a research session just because it grew large.
  */
 
-import type { AppSettings, LLMMessage } from "@/shared/types";
-import { estimateTokens } from "@/shared/tokens";
+import type { AppSettings, LLMMessage, TokenProfile } from "@/shared/types";
+import { countMessageTokens, estimateTokens, estimateTokensMemoized } from "@/shared/tokens";
 import { summarizeConversation } from "./ContextBuilder";
 
 export interface BudgetBreakdown {
@@ -28,24 +28,24 @@ export interface CompressionActions {
   dropToolDescriptions: boolean;
 }
 
+export interface PlanCompressionInput {
+  systemPrompt: string;
+  conversation: LLMMessage[];
+  workspaceText: string;
+  activeTabText: string;
+  toolDescriptions: string;
+}
+
 export class TokenBudget {
   constructor(private readonly settings: AppSettings) {}
 
-  estimate(
-    parts: {
-      systemPrompt: string;
-      conversation: LLMMessage[];
-      workspaceText: string;
-      activeTabText: string;
-      toolDescriptions: string;
-    },
-  ): { breakdown: BudgetBreakdown; total: number } {
+  estimate(parts: PlanCompressionInput): { breakdown: BudgetBreakdown; total: number } {
     const breakdown: BudgetBreakdown = {
-      system: estimateTokens(parts.systemPrompt),
-      conversation: parts.conversation.reduce((acc, m) => acc + estimateTokens(m.content) + 4, 0),
-      workspace: estimateTokens(parts.workspaceText),
-      activeTab: estimateTokens(parts.activeTabText),
-      tools: estimateTokens(parts.toolDescriptions),
+      system: estimateTokensMemoized(parts.systemPrompt),
+      conversation: parts.conversation.reduce((acc, m) => acc + countMessageTokens(m), 0),
+      workspace: estimateTokensMemoized(parts.workspaceText),
+      activeTab: estimateTokensMemoized(parts.activeTabText),
+      tools: estimateTokensMemoized(parts.toolDescriptions),
       total: 0,
     };
     breakdown.total = breakdown.system + breakdown.conversation + breakdown.workspace + breakdown.activeTab + breakdown.tools;
@@ -55,15 +55,17 @@ export class TokenBudget {
   /**
    * Decides which compression actions bring the request under the limit.
    * Returns the actions; the caller applies them and rebuilds the request.
+   *
+   * @param profile   Resolved token-efficiency profile (drives thresholds).
+   * @param capabilityContextTokens  The model's detected context window, if
+   *   known. When supplied, the effective limit is the smaller of this and
+   *   `settings.provider.contextLimitTokens` — so a small-context local
+   *   model (e.g. llama-3 @ 8k) compresses even when the setting is 64k.
    */
   planCompression(
-    parts: {
-      systemPrompt: string;
-      conversation: LLMMessage[];
-      workspaceText: string;
-      activeTabText: string;
-      toolDescriptions: string;
-    },
+    parts: PlanCompressionInput,
+    profile?: TokenProfile,
+    capabilityContextTokens?: number,
   ): CompressionActions {
     if (!this.settings.compression.enabled) {
       return {
@@ -74,7 +76,7 @@ export class TokenBudget {
       };
     }
     const { breakdown } = this.estimate(parts);
-    const limit = this.settings.provider.contextLimitTokens || 128_000;
+    const limit = this.effectiveContextLimit(capabilityContextTokens);
     // Reserve 30% of the window for the response + tool outputs.
     const budget = Math.floor(limit * 0.7);
 
@@ -93,8 +95,12 @@ export class TokenBudget {
       actions.dropActiveTabText = true;
       total -= breakdown.activeTab;
     }
-    // Tier 2: compress older conversation.
-    if (total > budget && breakdown.conversation > 400) {
+    // Tier 2: compress older conversation. The gate scales with the profile:
+    // aggressive levels compress sooner (smaller minimum conversation size).
+    const conversationGate = profile
+      ? Math.min(400, Math.floor(profile.recentToolOutputCap / 10))
+      : 400;
+    if (total > budget && breakdown.conversation > conversationGate) {
       actions.compressConversation = true;
       total -= breakdown.conversation;
       total += estimateTokens(`[Earlier conversation summary]\n${summarizeConversation(parts.conversation)}`);
@@ -108,6 +114,19 @@ export class TokenBudget {
     // Tool schemas remain available even under pressure. Omitting them causes
     // invalid tool arguments, which costs more tokens through retries.
     return actions;
+  }
+
+  /**
+   * The effective context limit is the smaller of the user-configured
+   * `contextLimitTokens` and the model's detected capability window. This
+   * prevents budgeting against 64k when the real window is 8k (e.g. llama-3).
+   */
+  private effectiveContextLimit(capabilityContextTokens?: number): number {
+    const setting = this.settings.provider.contextLimitTokens || 128_000;
+    if (capabilityContextTokens && capabilityContextTokens > 0) {
+      return Math.min(setting, capabilityContextTokens);
+    }
+    return setting;
   }
 
   /** Human-readable breakdown for the dev view. */

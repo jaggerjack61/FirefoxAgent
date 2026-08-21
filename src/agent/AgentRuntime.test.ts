@@ -754,6 +754,113 @@ describe("AgentRuntime — active tab token efficiency", () => {
     expect(third.messages.at(-1)?.content).toContain("Current page text");
     expect(third.messages.at(-1)?.content).not.toContain("page unchanged");
   });
+
+  it("stubs a redundant consecutive page read on the same tab", async () => {
+    // The model calls get_page_snapshot twice in a row on the same tab with
+    // no interaction in between. The second call should return a dedup stub
+    // (balanced profile has dedupePageReads: true).
+    const harness = createHarness([
+      {
+        content: null,
+        toolCalls: [
+          toolCall("c1", "get_page_snapshot", {}),
+          toolCall("c2", "get_page_snapshot", {}),
+        ],
+        finishReason: "tool_calls",
+      },
+      finalResponse("Done."),
+    ], {
+      tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
+      pages: { 1: makeSnapshot("https://current.test", "Current", [], "Current page text") },
+    });
+
+    await harness.runtime.run("Read this page twice");
+
+    // Both tool calls executed, but the second observation is a dedup stub.
+    const toolMessages = harness.provider.requests[1].messages.filter((m) => m.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0].content).toContain("Current page text");
+    expect(toolMessages[1].content).toContain("unchanged");
+    expect(toolMessages[1].content).toContain("deduplicated");
+  });
+
+  it("does not stub when an interaction happens between page reads", async () => {
+    // click_element between two page reads means the page may have changed,
+    // so the second read must return fresh content (not a stub).
+    const harness = createHarness([
+      {
+        content: null,
+        toolCalls: [
+          toolCall("c1", "get_page_snapshot", {}),
+          toolCall("c2", "click_element", { elementId: "E1" }),
+          toolCall("c3", "get_page_snapshot", {}),
+        ],
+        finishReason: "tool_calls",
+      },
+      finalResponse("Done."),
+    ], {
+      tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
+      pages: { 1: makeSnapshot("https://current.test", "Current", [{ id: "E1", role: "link", name: "Go" }], "Current page text") },
+    });
+
+    await harness.runtime.run("Read, click, read again");
+
+    const toolMessages = harness.provider.requests[1].messages.filter((m) => m.role === "tool");
+    // The third observation (second page read) is NOT a stub — click_element
+    // updated lastToolCall so the dedup check does not fire.
+    const secondRead = toolMessages[2];
+    expect(secondRead.content).toContain("Current page text");
+    expect(secondRead.content).not.toContain("unchanged");
+    expect(secondRead.content).not.toContain("deduplicated");
+  });
+
+  it("does not stub redundant reads when dedupePageReads is disabled (conservative)", async () => {
+    // Conservative profile has dedupePageReads: false, so even consecutive
+    // reads return full content. We build the harness manually to inject
+    // a conservative token-efficiency setting.
+    const store = new FakeMemoryStore();
+    const gateway = new FakeGateway({
+      tabs: [{ id: 1, title: "Current", url: "https://current.test" }],
+      pages: { 1: makeSnapshot("https://current.test", "Current", [], "Current page text") },
+    });
+    const provider = new FakeProvider([
+      {
+        content: null,
+        toolCalls: [
+          toolCall("c1", "get_page_snapshot", {}),
+          toolCall("c2", "get_page_snapshot", {}),
+        ],
+        finishReason: "tool_calls",
+      },
+      finalResponse("Done."),
+    ]);
+    const registry = createToolRegistry();
+    const workspace = new WorkspaceManager({ storage: store });
+    const tasks = new TaskManager(store);
+    const events: BackgroundEvent[] = [];
+    const confirmations = new ConfirmationManager({ emit: (e) => events.push(e) });
+    const settings: AppSettings = {
+      ...DEFAULT_SETTINGS,
+      tokenEfficiency: { level: "conservative" },
+    };
+    const runtime = new AgentRuntime({
+      provider, registry, workspace, tasks, confirmations, gateway, settings,
+      emit: (e) => events.push(e),
+      emitDev: () => undefined,
+      persistMessage: async () => undefined,
+      getActionHistory: () => [],
+      getPromptCacheKey: () => "browser-agent-v1:test-conversation",
+      reportUsage: () => undefined,
+    });
+    void workspace.newWorkspace("Test");
+
+    await runtime.run("Read this page twice");
+
+    const toolMessages = provider.requests[1].messages.filter((m) => m.role === "tool");
+    // Both reads return full content (no stub).
+    expect(toolMessages[1].content).toContain("Current page text");
+    expect(toolMessages[1].content).not.toContain("deduplicated");
+  });
 });
 
 describe("AgentRuntime — cross-tab action (spec §42 scenario 5)", () => {

@@ -301,6 +301,8 @@ export class FakeProvider implements LLMProvider {
       parallelTools: true,
       structuredOutput: true,
       maxContextTokens: 128_000,
+      supportsPromptCaching: false,
+      cacheKeyStrategy: "implicit",
       ...this.capabilitiesOverride,
     };
   }

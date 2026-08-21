@@ -117,10 +117,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
   private async sendChatCompletions(request: LLMRequest, stream: boolean, opts?: SendOptions): Promise<LLMResponse> {
     const model = request.model ?? this.config.model;
-    const officialOpenAI = isOfficialOpenAIEndpoint(this.config.baseUrl);
-    const explicitCache = officialOpenAI
-      && supportsExplicitPromptCaching(model)
-      && request.cacheStablePrefix === true;
+    // Prompt-cache routing is driven by capability, not by hostname. Implicit
+    // providers (DeepSeek) cache a stable prefix automatically and must NOT
+    // receive a cache key; explicit providers (OpenAI GPT-5.6+) get the key,
+    // options, and system-message breakpoint.
+    const caps = this.capabilities(model);
+    const cacheStable = caps.supportsPromptCaching && request.cacheStablePrefix === true;
+    const explicitCache = cacheStable && caps.cacheKeyStrategy === "explicit";
+    const sendCacheKey = explicitCache && !!request.cacheKey;
     const normalizedMessages = normalizeChatCompletionHistory(request.messages);
     const body: ChatCompletionsRequest = {
       model,
@@ -136,7 +140,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       max_tokens: request.maxOutputTokens ?? this.config.maxOutputTokens,
       stream,
       ...(stream && supportsStreamUsage(this.config.baseUrl) ? { stream_options: { include_usage: true } } : {}),
-      ...(officialOpenAI && request.cacheKey ? { prompt_cache_key: request.cacheKey } : {}),
+      ...(sendCacheKey ? { prompt_cache_key: request.cacheKey } : {}),
       ...(explicitCache ? { prompt_cache_options: { mode: "implicit" as const, ttl: "30m" as const } } : {}),
       ...(request.tools?.length ? { tools: request.tools as ChatCompletionsRequest["tools"], tool_choice: "auto" as const } : {}),
       ...(request.jsonMode ? { response_format: { type: "json_object" as const } } : {}),
@@ -172,10 +176,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
   private async sendResponses(request: LLMRequest, stream: boolean, opts?: SendOptions): Promise<LLMResponse> {
     const model = request.model ?? this.config.model;
-    const officialOpenAI = isOfficialOpenAIEndpoint(this.config.baseUrl);
-    const explicitCache = officialOpenAI
-      && supportsExplicitPromptCaching(model)
-      && request.cacheStablePrefix === true;
+    // Capability-driven cache routing (see sendChatCompletions).
+    const caps = this.capabilities(model);
+    const cacheStable = caps.supportsPromptCaching && request.cacheStablePrefix === true;
+    const explicitCache = cacheStable && caps.cacheKeyStrategy === "explicit";
+    const sendCacheKey = explicitCache && !!request.cacheKey;
     const systemIdx = request.messages.findIndex((m) => m.role === "system");
     const instructions = systemIdx !== -1 ? request.messages[systemIdx].content : "";
     const input: ResponsesInputItem[] = request.messages.flatMap((m): ResponsesInputItem[] => {
@@ -210,7 +215,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       max_output_tokens: request.maxOutputTokens ?? this.config.maxOutputTokens,
       stream,
       ...(!explicitCache && instructions ? { instructions } : {}),
-      ...(officialOpenAI && request.cacheKey ? { prompt_cache_key: request.cacheKey } : {}),
+      ...(sendCacheKey ? { prompt_cache_key: request.cacheKey } : {}),
       ...(explicitCache ? { prompt_cache_options: { mode: "implicit" as const, ttl: "30m" as const } } : {}),
       ...(request.tools?.length
         ? {
@@ -371,14 +376,6 @@ function supportsReasoningEffort(model: string): boolean {
   return /^(?:gpt-5(?:[.\-]|$)|o[1-9](?:[.\-]|$)|.*codex(?:[.\-]|$))/i.test(model);
 }
 
-function isOfficialOpenAIEndpoint(baseUrl: string): boolean {
-  try {
-    return new URL(baseUrl).hostname.toLowerCase() === "api.openai.com";
-  } catch {
-    return false;
-  }
-}
-
 function supportsStreamUsage(baseUrl: string): boolean {
   try {
     const host = new URL(baseUrl).hostname.toLowerCase();
@@ -386,15 +383,6 @@ function supportsStreamUsage(baseUrl: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** GPT-5.6 and later use explicit prompt-cache breakpoints. */
-function supportsExplicitPromptCaching(model: string): boolean {
-  const match = model.toLowerCase().match(/^gpt-(\d+)(?:\.(\d+))?/);
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2] ?? 0);
-  return major > 5 || (major === 5 && minor >= 6);
 }
 
 /** Parses a structured-output fallback payload from non-tool models. */

@@ -62,7 +62,8 @@ export function extractLinks(maxLinks: number, filter?: string): Record<string, 
     const text = cap((a.textContent ?? "").replace(/\s+/g, " ").trim(), 120);
     if (!text || !a.href) continue;
     if (re && !re.test(text) && !re.test(a.href)) continue;
-    links.push({ text, href: a.href });
+    // Cap long tracking/redirect URLs so they do not waste tokens.
+    links.push({ text, href: cap(a.href, 256) });
     if (links.length >= maxLinks) break;
   }
   return { count: links.length, links, truncated: links.length >= maxLinks };

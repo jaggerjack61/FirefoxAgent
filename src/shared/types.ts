@@ -83,6 +83,62 @@ export interface ModelCapabilities {
   structuredOutput: boolean;
   /** Estimated context window in tokens; 0 = unknown. */
   maxContextTokens?: number;
+  /** Whether the provider can cache a stable prompt prefix. */
+  supportsPromptCaching: boolean;
+  /**
+   * How the provider expects cache routing to be signalled.
+   * - "implicit": prefix is cached automatically; no cache key sent (DeepSeek).
+   * - "explicit": a cache key + breakpoints are sent (OpenAI GPT-5.6+).
+   */
+  cacheKeyStrategy: "implicit" | "explicit";
+}
+
+// ---------------------------------------------------------------------------
+// Token efficiency
+// ---------------------------------------------------------------------------
+
+/**
+ * User-selectable aggressiveness for token usage. Drives a {@link TokenProfile}
+ * of concrete caps/thresholds via {@link resolveTokenProfile}.
+ *
+ * - "conservative" — keep full history, pretty-printed tool output, no dedup.
+ * - "balanced" — compact prior runtime-context, compact JSON, dedupe reads.
+ * - "aggressive" — smallest caps, earliest compression, replace prior context.
+ * - "auto" — pick a level from the model's context window at runtime.
+ */
+export type TokenEfficiencyLevel = "conservative" | "balanced" | "aggressive" | "auto";
+
+/**
+ * How prior runtime-context messages (task + workspace + active-tab snapshot)
+ * are treated when a new one is appended each turn.
+ * - "retain" — leave prior messages verbatim (compression handles them later).
+ * - "compress-previous" — replace the prior runtime-context with a stub.
+ * - "replace-previous" — replace prior + strip active-tab text from the stub.
+ */
+export type RuntimeContextRetention = "retain" | "compress-previous" | "replace-previous";
+
+/**
+ * Concrete token-efficiency knobs resolved from a {@link TokenEfficiencyLevel}.
+ * Consumers read these instead of raw settings so behaviour is level-driven.
+ */
+export interface TokenProfile {
+  level: TokenEfficiencyLevel;
+  /** Per-observation hard cap (chars) applied in renderToolOutput. */
+  toolOutputHardCap: number;
+  /** Cap (chars) for tool observations kept verbatim in the recent window. */
+  recentToolOutputCap: number;
+  /** Conversation length (messages) that triggers compression. */
+  summarizeThreshold: number;
+  /** Number of most-recent messages kept verbatim. */
+  keepRecentMessages: number;
+  /** How prior runtime-context messages are treated. */
+  runtimeContextRetention: RuntimeContextRetention;
+  /** Snapshot visible-text cap (chars); overrides limits.maxPageTextChars. */
+  maxPageTextChars: number;
+  /** Serialize tool outputs as compact JSON (no indentation). */
+  compactToolJson: boolean;
+  /** Return a stub for redundant same-version page reads. */
+  dedupePageReads: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +229,11 @@ export interface MemorySettings {
   autoSummarizePages: boolean;
 }
 
+export interface TokenEfficiencySettings {
+  /** Aggressiveness level; "auto" picks from the model's context window. */
+  level: TokenEfficiencyLevel;
+}
+
 export interface AppSettings {
   provider: ProviderConfig;
   mode: AgentMode;
@@ -180,6 +241,7 @@ export interface AppSettings {
   privacy: PrivacySettings;
   compression: CompressionSettings;
   memory: MemorySettings;
+  tokenEfficiency: TokenEfficiencySettings;
   devMode: boolean;
   /** Search engine used by the search_web tool. */
   searchEngine: "google" | "duckduckgo" | "bing";
@@ -351,7 +413,8 @@ export type DevEvent =
   | { kind: "llm_request"; ts: number; messageCount: number; estimatedTokens: number; contextLayers: Record<string, number>; model: string }
   | { kind: "llm_response"; ts: number; latencyMs: number; finishReason: string; estimatedTokens: number; toolCalls: number; iteration: number; usage?: LLMUsage }
   | { kind: "tool_call"; ts: number; tool: string; input: unknown; output?: unknown; ok: boolean; latencyMs: number }
-  | { kind: "context"; ts: number; layers: Record<string, number>; totalTokens: number; compressed: boolean }
+  | { kind: "context"; ts: number; layers: Record<string, number>; totalTokens: number; compressed: boolean; activeTabSkipped?: boolean; cacheWarning?: string }
+  | { kind: "cache_feedback"; ts: number; hitRate: number; requestCount: number; warning?: string }
   | { kind: "snapshot"; ts: number; tabId: number; url: string; elements: number; textChars: number }
   | { kind: "confirmation"; ts: number; tool: string; approved: boolean; highRisk: boolean }
   | { kind: "error"; ts: number; code: string; message: string };

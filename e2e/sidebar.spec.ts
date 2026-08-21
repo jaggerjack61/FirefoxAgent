@@ -38,6 +38,7 @@ async function installMock(page: Page, opts?: { devMode?: boolean }): Promise<Mo
         privacy: { allowActivePageContent: true, allowOtherTabContent: true, allowFormValues: false, allowSelectedText: true, excludeSensitiveFields: true },
         compression: { enabled: true, keepRecentMessages: 8, summarizeThreshold: 24 },
         memory: { enabled: true, autoSummarizePages: true },
+        tokenEfficiency: { level: "balanced" },
         devMode: opts?.devMode ?? false,
         searchEngine: "google",
       },

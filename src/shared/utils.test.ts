@@ -1,9 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { redact, redactUrl, isSecretKey } from "./redact";
 import { estimateTokens, formatTokens } from "./tokens";
 import { fnv1a } from "./id";
-import { buildConversationLayer, buildSystemPrompt, renderActiveTabContext, formatToolObservation } from "@/agent/ContextBuilder";
+import {
+  buildConversationLayer,
+  buildSystemPrompt,
+  renderActiveTabContext,
+  formatToolObservation,
+  configureToolOutput,
+} from "@/agent/ContextBuilder";
 import type { LLMMessage } from "./types";
+
+afterEach(() => {
+  // Reset tool-output config to defaults between tests so ordering doesn't matter.
+  configureToolOutput({ compactJson: false, maxChars: 30_000 });
+});
 
 describe("redact", () => {
   it("redacts known secret keys", () => {
@@ -101,14 +112,27 @@ describe("buildConversationLayer", () => {
     expect(result.messages.find((m) => m.role === "tool")!.content).toBe("Clicked E3.");
   });
 
-  it("leaves short conversations untouched (no truncation below threshold)", () => {
+  it("truncates oversized tool outputs even in short conversations (below threshold)", () => {
     const messages: LLMMessage[] = [
       { role: "user", content: "hi" },
       { role: "tool", content: "y".repeat(9_000), toolCallId: "t1", name: "get_page_text" },
     ];
     const result = buildConversationLayer(messages, { keepRecent: 8, summarizeThreshold: 24 });
+    // Tool outputs are capped even below the summarize threshold so a single
+    // large page read cannot dominate the context window.
+    expect(result.messages[1].content!.length).toBeLessThan(9_000);
+    expect(result.messages[1].content).toContain("truncated");
+  });
+
+  it("leaves short conversations with small tool outputs untouched (ref identity)", () => {
+    const messages: LLMMessage[] = [
+      { role: "user", content: "hi" },
+      { role: "tool", content: "small output", toolCallId: "t1", name: "click_element" },
+    ];
+    const result = buildConversationLayer(messages, { keepRecent: 8, summarizeThreshold: 24 });
+    // When nothing needed truncation, the original array reference is returned.
     expect(result.messages).toBe(messages);
-    expect(result.messages[1].content).toHaveLength(9_000);
+    expect(result.messages[1].content).toBe("small output");
   });
 });
 
@@ -160,5 +184,48 @@ describe("formatToolObservation", () => {
     const err = formatToolObservation("click_element", null, { code: "ELEMENT_NOT_FOUND", message: "gone", suggestedAction: "Refresh" });
     expect(err).toContain("ELEMENT_NOT_FOUND");
     expect(err).toContain("Refresh");
+  });
+});
+
+describe("configureToolOutput (compact JSON + hard cap)", () => {
+  it("renders pretty JSON by default", () => {
+    const out = formatToolObservation("list_tabs", { tabs: [{ id: 1, title: "A" }] });
+    // Pretty JSON includes newlines + indentation.
+    expect(out).toContain("{\n");
+    expect(out).toContain("  ");
+  });
+
+  it("renders compact JSON when compactJson is enabled", () => {
+    configureToolOutput({ compactJson: true });
+    const out = formatToolObservation("list_tabs", { tabs: [{ id: 1, title: "A" }] });
+    // Compact JSON has no indentation newlines inside the object.
+    expect(out).not.toContain("{\n");
+    expect(out).toContain("{\"tabs\":[{\"id\":1,\"title\":\"A\"}]}");
+  });
+
+  it("caps oversized tool output at maxChars", () => {
+    configureToolOutput({ compactJson: true, maxChars: 50 });
+    const big = { text: "x".repeat(500) };
+    const out = formatToolObservation("get_page_text", big);
+    expect(out).toContain("[truncated]");
+    // The truncation happens on the rendered JSON before it is wrapped in
+    // the <observation> envelope. Extract the JSON line and verify it is bounded.
+    const lines = out.split("\n");
+    const jsonLine = lines.find((l) => l.includes("[truncated]")) ?? "";
+    expect(jsonLine.length).toBeLessThanOrEqual(50 + "… [truncated]".length);
+    // The full output is much smaller than the untruncated 500-char payload.
+    expect(out.length).toBeLessThan(500);
+  });
+
+  it("does not truncate small outputs under the cap", () => {
+    configureToolOutput({ maxChars: 1_000 });
+    const out = formatToolObservation("click_element", { ok: true });
+    expect(out).not.toContain("[truncated]");
+  });
+
+  it("handles string outputs without JSON serialization", () => {
+    const out = formatToolObservation("get_page_text", "plain string output");
+    expect(out).toContain("plain string output");
+    expect(out).not.toContain("{");
   });
 });

@@ -13,7 +13,7 @@
 
 import type { AgentMode, AppSettings, LLMMessage } from "@/shared/types";
 import { wrapPageContent, wrapObservation } from "@/security/injection";
-import { estimateTokens } from "@/shared/tokens";
+import { sumMessageTokens } from "@/shared/tokens";
 import { formatClock } from "@/shared/id";
 
 export interface SystemPromptInput {
@@ -110,12 +110,24 @@ export function buildConversationLayer(
   opts: ConversationLayerOptions,
 ): ConversationLayerResult {
   const { keepRecent, summarizeThreshold } = opts;
+  const maxToolOutput = opts.maxToolOutputChars ?? MAX_RECENT_TOOL_OUTPUT_CHARS;
   if (messages.length <= summarizeThreshold) {
-    return { messages, totalTokens: sumMessageTokens(messages) };
+    // Even in short conversations, cap oversized tool observations so a
+    // single large page read does not dominate the context. Only build a new
+    // array when at least one message was actually truncated; otherwise the
+    // original reference is returned (important for callers that rely on
+    // message-object identity, e.g. the active-tab skip tracker).
+    let truncated = false;
+    const capped = messages.map((m) => {
+      const t = truncateToolOutput(m, maxToolOutput);
+      if (t !== m) truncated = true;
+      return t;
+    });
+    return { messages: truncated ? capped : messages, totalTokens: sumMessageTokens(truncated ? capped : messages) };
   }
   const recent = messages
     .slice(-keepRecent)
-    .map((m) => truncateToolOutput(m, opts.maxToolOutputChars ?? MAX_RECENT_TOOL_OUTPUT_CHARS));
+    .map((m) => truncateToolOutput(m, maxToolOutput));
   const older = messages.slice(0, messages.length - keepRecent);
   const summary = summarizeConversation(older);
   const summaryMsg: LLMMessage = {
@@ -148,12 +160,6 @@ export function summarizeConversation(messages: LLMMessage[]): string {
     return `${tag}: ${content}${tools ? ` [tools: ${tools}]` : ""}`;
   });
   return lines.join("\n");
-}
-
-function sumMessageTokens(messages: LLMMessage[]): number {
-  let total = 0;
-  for (const m of messages) total += estimateTokens(m.content) + 4;
-  return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +211,33 @@ export function renderActiveTabContext(input: ActiveTabContextInput): string {
 // Tool observations
 // ---------------------------------------------------------------------------
 
+/**
+ * Runtime-configurable knobs for tool observation rendering. Set once per
+ * turn from the resolved {@link TokenProfile} via {@link configureToolOutput}.
+ * This avoids threading opts through every formatToolObservation call site.
+ */
+interface ToolOutputConfig {
+  /** Serialize structured outputs as compact JSON (no indentation). */
+  compactJson: boolean;
+  /** Per-observation hard cap (chars). */
+  maxChars: number;
+}
+
+const DEFAULT_TOOL_OUTPUT_CONFIG: ToolOutputConfig = {
+  compactJson: false,
+  maxChars: 30_000,
+};
+
+let toolOutputConfig: ToolOutputConfig = DEFAULT_TOOL_OUTPUT_CONFIG;
+
+/**
+ * Configures tool-output rendering for the current turn from the resolved
+ * token-efficiency profile. Call this at the start of buildContext.
+ */
+export function configureToolOutput(opts: Partial<ToolOutputConfig>): void {
+  toolOutputConfig = { ...DEFAULT_TOOL_OUTPUT_CONFIG, ...opts };
+}
+
 /** Formats a tool observation for the conversation. */
 export function formatToolObservation(tool: string, output: unknown, error?: { code: string; message: string; suggestedAction?: string }): string {
   if (error) {
@@ -224,9 +257,10 @@ export function formatToolObservation(tool: string, output: unknown, error?: { c
 function renderToolOutput(output: unknown): string {
   if (output === null || output === undefined) return "(no output)";
   if (typeof output === "string") return output;
-  // Trim giant outputs (page text) to protect the budget.
-  const text = JSON.stringify(output, null, 1);
-  return text.length > 30_000 ? `${text.slice(0, 30_000)}… [truncated]` : text;
+  // Compact JSON (no indentation) saves ~30-60% on structured outputs.
+  const text = JSON.stringify(output, toolOutputConfig.compactJson ? undefined : null, toolOutputConfig.compactJson ? 0 : 1);
+  const cap = toolOutputConfig.maxChars;
+  return text.length > cap ? `${text.slice(0, cap)}… [truncated]` : text;
 }
 
 /** Simple history line, e.g. "10:32:11 Read current page". */

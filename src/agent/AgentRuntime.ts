@@ -18,13 +18,21 @@ import type { ConfirmationManager } from "./ConfirmationManager";
 import type { BrowserGateway } from "@/shared/browserGateway";
 import { ToolError } from "@/shared/errors";
 import { evaluateConfirmation, isReadOnlyTool, type ConfirmationContext } from "@/security/confirmation";
-import { buildSystemPrompt, buildConversationLayer, formatToolObservation, renderActiveTabContext } from "./ContextBuilder";
+import { buildSystemPrompt, buildConversationLayer, configureToolOutput, formatToolObservation, renderActiveTabContext } from "./ContextBuilder";
 import { TokenBudget } from "./TokenBudget";
+import { resolveTokenProfile } from "@/settings/SettingsRepository";
 import { newId } from "@/shared/id";
 import { estimateTokens } from "@/shared/tokens";
 import { parseStructuredToolOutput, structuredOutputInstruction } from "@/providers/OpenAICompatibleProvider";
 import type { BackgroundEvent } from "@/shared/events";
 import { derivePageFacts, derivePageSummary } from "@/workspace/pageNotes";
+
+/**
+ * Sentinel prefix marking a runtime-context user message (task + workspace +
+ * active-tab snapshot). Used to locate prior context updates so they can be
+ * stubbed down instead of accumulating verbatim every turn.
+ */
+const RUNTIME_CONTEXT_SENTINEL = "[RUNTIME CONTEXT UPDATE";
 
 export interface AgentRuntimeDeps {
   provider: LLMProvider;
@@ -95,6 +103,11 @@ export class AgentRuntime {
    * verbatim window, the block is replaced by a stub to save tokens.
    */
   private lastActiveTabContext: { tabId: number; version: number; message: LLMMessage } | null = null;
+  /**
+   * The last tool call executed, used by the page-read dedup to detect
+   * consecutive redundant reads on the same tab.
+   */
+  private lastToolCall: { name: string; tabId: number | undefined } | null = null;
 
   constructor(private readonly deps: AgentRuntimeDeps) {}
 
@@ -366,6 +379,49 @@ export class AgentRuntime {
     return response;
   }
 
+  /**
+   * Replaces prior runtime-context messages with a compact stub so only the
+   * latest full snapshot stays in history. Driven by the profile's
+   * `runtimeContextRetention`:
+   * - "retain": no-op (conservative; full history kept).
+   * - "compress-previous": replace prior context with a task-only stub.
+   * - "replace-previous": same, but also drop the active-tab text reference.
+   *
+   * This is the single biggest structural token saving: without it, a 25-step
+   * task accumulates 25 full page snapshots (each up to ~6k chars) that only
+   * compress at the summarize threshold.
+   */
+  private compactPriorRuntimeContext(
+    retention: "retain" | "compress-previous" | "replace-previous",
+    taskBlock: string,
+  ): void {
+    if (retention === "retain") return;
+    // Find the last runtime-context message; everything before it that is
+    // also a runtime-context message gets stubbed. We keep the latest one
+    // intact (it is about to be superseded by the new context anyway, but
+    // stubbing it here would lose the bridge between turns).
+    let lastContextIdx = -1;
+    for (let i = this.conversation.length - 1; i >= 0; i--) {
+      if (this.conversation[i].content?.startsWith(RUNTIME_CONTEXT_SENTINEL)) {
+        lastContextIdx = i;
+        break;
+      }
+    }
+    if (lastContextIdx <= 0) return; // none, or only one (no prior to compact)
+
+    const taskEssence = taskBlock
+      ? taskBlock.split("\n").find((l) => l.startsWith("Goal:"))?.slice(0, 160) ?? ""
+      : "";
+    for (let i = 0; i < lastContextIdx; i++) {
+      const msg = this.conversation[i];
+      if (!msg.content?.startsWith(RUNTIME_CONTEXT_SENTINEL)) continue;
+      const dropTab = retention === "replace-previous";
+      msg.content = dropTab
+        ? `[Previous runtime context — compacted. ${taskEssence} Prior page details are in workspace notes above.]`
+        : `[Previous runtime context — compacted. ${taskEssence} See workspace notes for prior page details; only the latest snapshot is kept in full.]`;
+    }
+  }
+
   private async buildContext(settings: AppSettings): Promise<{
     messages: LLMMessage[];
     toolDefs: { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }[];
@@ -388,7 +444,27 @@ export class AgentRuntime {
       maxActions: settings.limits.maxActionsPerTask,
     });
 
+    // Resolve the token-efficiency profile early. For "auto", pick a level
+    // from the model's detected context window so small-context models
+    // compress sooner. The profile drives runtime-context retention and the
+    // budget thresholds below.
+    const caps = this.deps.provider.capabilities(settings.provider.model);
+    const profile = resolveTokenProfile(
+      settings.tokenEfficiency.level,
+      caps.maxContextTokens,
+    );
+    // Configure tool-output rendering (compact JSON + level-dependent cap)
+    // for this turn.
+    configureToolOutput({
+      compactJson: profile.compactToolJson,
+      maxChars: profile.toolOutputHardCap,
+    });
+
     const taskBlock = this.deps.tasks.renderForModel();
+    // Compact prior runtime-context messages into stubs before appending the
+    // new one, so only the latest full snapshot stays in history. This is a
+    // no-op at the "retain" (conservative) level.
+    this.compactPriorRuntimeContext(profile.runtimeContextRetention, taskBlock);
     const memoryBlock = await this.renderMemory(settings);
     let workspaceBlock = [this.deps.workspace.renderForModel(settings.limits.maxTabsInspected), memoryBlock].filter(Boolean).join("\n\n");
     const activeTab = await this.renderActiveTab(settings);
@@ -414,7 +490,7 @@ export class AgentRuntime {
       workspaceText: workspaceBlock,
       activeTabText: activeTabBlock,
       toolDescriptions: nativeToolSchemaText,
-    });
+    }, profile, caps.maxContextTokens);
 
     if (compression.factsOnlyWorkspace) {
       workspaceBlock = [
@@ -442,11 +518,15 @@ export class AgentRuntime {
     // threshold is crossed, compact once and keep appending to that checkpoint
     // instead of regenerating a different summary on every request.
     const conversationWithContext = [...this.conversation, runtimeContext];
+    // Use the profile's thresholds (level-driven) instead of raw settings.
+    const profileKeepRecent = profile.keepRecentMessages;
+    const profileThreshold = settings.compression.enabled
+      ? (compression.compressConversation ? 6 : profile.summarizeThreshold)
+      : Number.MAX_SAFE_INTEGER;
     const conv = buildConversationLayer(conversationWithContext, {
-      keepRecent: compression.compressConversation ? Math.max(2, Math.floor(settings.compression.keepRecentMessages / 2)) : settings.compression.keepRecentMessages,
-      summarizeThreshold: settings.compression.enabled
-        ? (compression.compressConversation ? 6 : settings.compression.summarizeThreshold)
-        : Number.MAX_SAFE_INTEGER,
+      keepRecent: compression.compressConversation ? Math.max(2, Math.floor(profileKeepRecent / 2)) : profileKeepRecent,
+      summarizeThreshold: profileThreshold,
+      maxToolOutputChars: profile.recentToolOutputCap,
     });
     this.conversation = conv.messages;
 
@@ -597,6 +677,29 @@ export class AgentRuntime {
         : undefined;
       const fallbackTabId = AUTO_ADD_TOOLS.has(call.name) ? activeTabId : undefined;
       const targetTabId = validated.tabId ?? activeTabId;
+
+      // Deduplicate redundant page reads: when the profile enables it and the
+      // model re-reads the active tab whose snapshot version matches the last
+      // one injected into context, return a stub instead of re-reading. The
+      // current page content is already in the runtime-context block above.
+      const stub = this.maybeStubRedundantPageRead(call.name, targetTabId, settings);
+      if (stub) {
+        const observation = formatToolObservation(call.name, stub);
+        this.emitDev({
+          kind: "tool_call",
+          ts: Date.now(),
+          tool: call.name,
+          input: call.arguments,
+          output: stub,
+          ok: true,
+          latencyMs: Date.now() - t0,
+        });
+        this.emitActivity(activityId, "ok", call.name, label, t0);
+        return { observation };
+      }
+      // Record this call for the next dedup check.
+      this.lastToolCall = { name: call.name, tabId: targetTabId };
+
       let confirmationComplete = false;
       let performedLocalWait = false;
 
@@ -859,6 +962,43 @@ export class AgentRuntime {
     return this.conversation.slice(-8).some((message) =>
       message.role === "tool" && /CONTENT_SCRIPT_UNAVAILABLE|reload the tab|page still loading|stale/i.test(message.content ?? ""),
     );
+  }
+
+  /** Page-read tools that can be deduped when the snapshot version is unchanged. */
+  private static readonly DEDUP_PAGE_READS = new Set(["get_page_snapshot", "get_page_text", "get_visible_text"]);
+
+  /**
+   * Returns a stub observation when the model re-reads the active tab without
+   * any interaction since the last read. Returns `null` when the read should
+   * proceed normally. This avoids redundant fetches when the model calls
+   * get_page_snapshot / get_page_text repeatedly without clicking or typing.
+   *
+   * Only fires when the immediately preceding tool call was also a page-read
+   * on the same tab — a single get_page_snapshot is always allowed (the model
+   * may need a fresh snapshot for a legitimate reason).
+   */
+  private maybeStubRedundantPageRead(toolName: string, targetTabId: number | undefined, settings: AppSettings): unknown | null {
+    const profile = resolveTokenProfile(
+      settings.tokenEfficiency.level,
+      this.deps.provider.capabilities(settings.provider.model).maxContextTokens,
+    );
+    if (!profile.dedupePageReads) return null;
+    if (!AgentRuntime.DEDUP_PAGE_READS.has(toolName)) return null;
+    // Only dedup consecutive page reads on the same tab with no interaction
+    // in between. The last tool call must have been a page read on the same tab.
+    const last = this.lastToolCall;
+    if (!last || !AgentRuntime.DEDUP_PAGE_READS.has(last.name) || last.tabId !== targetTabId) return null;
+    // The previous full block must still be in the conversation.
+    const prev = this.lastActiveTabContext;
+    if (!prev || targetTabId !== prev.tabId) return null;
+    if (!this.conversation.includes(prev.message)) return null;
+    return {
+      tabId: prev.tabId,
+      url: "(unchanged)",
+      title: "(unchanged)",
+      note: `Page unchanged since the last context update (version ${prev.version}). The current page content is already in your context above. Use find_text or extract_* tools for specific details, or reload_tab if you need a fresh snapshot.`,
+      deduplicated: true,
+    };
   }
 
   private emitActivity(

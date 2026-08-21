@@ -437,6 +437,24 @@ export class BackgroundOrchestrator {
       await this.store.saveConversation(this.conversation);
     }
     this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
+
+    // Cache-hit feedback: when the provider reports cache stats but the hit
+    // rate stays low across several requests, warn the user so they can see
+    // the prefix isn't being cached (e.g. unstable system prompt, provider
+    // doesn't support caching for this model).
+    if (cacheReported && this.tokenUsage.cacheReportingRequests >= 3) {
+      const totalInput = this.tokenUsage.inputTokens || 1;
+      const hitRate = this.tokenUsage.cachedInputTokens / totalInput;
+      if (hitRate < 0.3) {
+        this.pushDevEvent({
+          kind: "cache_feedback",
+          ts: Date.now(),
+          hitRate,
+          requestCount: this.tokenUsage.cacheReportingRequests,
+          warning: `Low prompt-cache hit rate (${(hitRate * 100).toFixed(0)}%). The system prompt + tools prefix may not be cached by this provider.`,
+        });
+      }
+    }
   }
 
   private resetTokenUsage(): void {
