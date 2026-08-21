@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AgentMode, AppSettings } from "@/shared/types";
+import type { AgentMode, AppSettings, ProviderEndpoint } from "@/shared/types";
 import { useAgentStore } from "../../store/agentStore";
 
 /** Settings panel: provider, mode, limits, privacy, memory, dev mode. */
@@ -27,6 +27,37 @@ export function SettingsPanel(): JSX.Element {
     setSaved(false);
     setTestResult(null);
     void saveSettings({ ...settings, provider: { ...settings.provider, ...patch } });
+  };
+
+  const updateEndpoints = (endpoints: ProviderEndpoint[]): void => {
+    setSaved(false);
+    setTestResult(null);
+    void saveSettings({ ...settings, provider: { ...settings.provider, endpoints } });
+  };
+
+  const updateEndpoint = (id: string, patch: Partial<ProviderEndpoint>): void => {
+    updateEndpoints((settings.provider.endpoints ?? []).map((ep) => (ep.id === id ? { ...ep, ...patch } : ep)));
+  };
+
+  const addEndpoint = (): void => {
+    const endpoints = settings.provider.endpoints ?? [];
+    updateEndpoints([
+      ...endpoints,
+      {
+        id: `ep-${Date.now()}`,
+        name: `Endpoint ${endpoints.length + 1}`,
+        baseUrl: "",
+        apiKey: "",
+        models: [],
+        protocol: "chat_completions",
+        customHeaders: {},
+        timeoutMs: settings.provider.timeoutMs,
+      },
+    ]);
+  };
+
+  const removeEndpoint = (id: string): void => {
+    updateEndpoints((settings.provider.endpoints ?? []).filter((ep) => ep.id !== id));
   };
 
   /** Calls the provider's /models endpoint to verify the connection + key. */
@@ -123,6 +154,56 @@ export function SettingsPanel(): JSX.Element {
             } catch { /* keep last valid */ }
           }} />
         </label>
+      </section>
+
+      <section>
+        <h3>Additional endpoints (multi-provider routing)</h3>
+        <p className="muted">
+          Route each model to a different base URL and API key. When you select a model in the chat,
+          the request is sent to the endpoint that lists that model. Models not listed on any endpoint
+          use the primary provider above.
+        </p>
+        {(settings.provider.endpoints ?? []).map((ep) => (
+          <div className="endpoint-card" key={ep.id}>
+            <div className="endpoint-head">
+              <strong>{ep.name || "Unnamed endpoint"}</strong>
+              <button className="ghost-btn danger" onClick={() => removeEndpoint(ep.id)}>Remove</button>
+            </div>
+            <label>Endpoint name
+              <input value={ep.name} onChange={(e) => updateEndpoint(ep.id, { name: e.target.value })} placeholder="e.g. OpenAI, Ollama" />
+            </label>
+            <label>API base URL
+              <input value={ep.baseUrl} onChange={(e) => updateEndpoint(ep.id, { baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" />
+            </label>
+            <label>API key
+              <input type="password" value={ep.apiKey} onChange={(e) => updateEndpoint(ep.id, { apiKey: e.target.value })} placeholder="sk-…" />
+            </label>
+            <label>Models served (comma-separated; empty = any model)
+              <input
+                value={ep.models.join(", ")}
+                onChange={(e) => updateEndpoint(ep.id, { models: e.target.value.split(",").map((m) => m.trim()).filter(Boolean) })}
+                placeholder="gpt-4o, gpt-4o-mini"
+              />
+            </label>
+            <label>Protocol
+              <select value={ep.protocol} onChange={(e) => updateEndpoint(ep.id, { protocol: e.target.value as "chat_completions" | "responses" })}>
+                <option value="chat_completions">chat/completions</option>
+                <option value="responses">responses (OpenAI)</option>
+              </select>
+            </label>
+            <label>Request timeout (ms)
+              <input type="number" min={1000} value={ep.timeoutMs} onChange={(e) => updateEndpoint(ep.id, { timeoutMs: Number(e.target.value) })} />
+            </label>
+            <label>Custom headers (JSON)
+              <input value={JSON.stringify(ep.customHeaders)} onChange={(e) => {
+                try {
+                  updateEndpoint(ep.id, { customHeaders: JSON.parse(e.target.value || "{}") });
+                } catch { /* keep last valid */ }
+              }} />
+            </label>
+          </div>
+        ))}
+        <button className="ghost-btn" onClick={addEndpoint}>+ Add endpoint</button>
       </section>
 
       <section>

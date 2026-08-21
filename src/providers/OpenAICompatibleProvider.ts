@@ -49,15 +49,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.caps = detectCapabilities(config);
   }
 
-  supportsToolCalling(): boolean {
+  supportsToolCalling(_model?: string): boolean {
     return this.caps.tools;
   }
 
-  supportsStreaming(): boolean {
+  supportsStreaming(_model?: string): boolean {
     return this.caps.streaming;
   }
 
-  capabilities(): ModelCapabilities {
+  capabilities(_model?: string): ModelCapabilities {
     return this.caps;
   }
 
@@ -116,14 +116,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
   // -------------------------------------------------------------------------
 
   private async sendChatCompletions(request: LLMRequest, stream: boolean, opts?: SendOptions): Promise<LLMResponse> {
+    const model = request.model ?? this.config.model;
     const officialOpenAI = isOfficialOpenAIEndpoint(this.config.baseUrl);
     const explicitCache = officialOpenAI
-      && supportsExplicitPromptCaching(this.config.model)
+      && supportsExplicitPromptCaching(model)
       && request.cacheStablePrefix === true;
     const normalizedMessages = normalizeChatCompletionHistory(request.messages);
     const body: ChatCompletionsRequest = {
-      model: this.config.model,
-      ...(supportsReasoningEffort(this.config.model) ? { reasoning_effort: this.config.reasoningEffort } : {}),
+      model,
+      ...(supportsReasoningEffort(model) ? { reasoning_effort: this.config.reasoningEffort } : {}),
       // Conversation compression or restored legacy data can split an
       // assistant/tool-call group. Strict providers reject those orphaned
       // tool results, so repair the history at the final wire boundary.
@@ -170,9 +171,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
   // -------------------------------------------------------------------------
 
   private async sendResponses(request: LLMRequest, stream: boolean, opts?: SendOptions): Promise<LLMResponse> {
+    const model = request.model ?? this.config.model;
     const officialOpenAI = isOfficialOpenAIEndpoint(this.config.baseUrl);
     const explicitCache = officialOpenAI
-      && supportsExplicitPromptCaching(this.config.model)
+      && supportsExplicitPromptCaching(model)
       && request.cacheStablePrefix === true;
     const systemIdx = request.messages.findIndex((m) => m.role === "system");
     const instructions = systemIdx !== -1 ? request.messages[systemIdx].content : "";
@@ -201,8 +203,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
       });
 
     const body: ResponsesRequest = {
-      model: this.config.model,
-      ...(supportsReasoningEffort(this.config.model) ? { reasoning: { effort: this.config.reasoningEffort } } : {}),
+      model,
+      ...(supportsReasoningEffort(model) ? { reasoning: { effort: this.config.reasoningEffort } } : {}),
       input,
       temperature: request.temperature ?? this.config.temperature,
       max_output_tokens: request.maxOutputTokens ?? this.config.maxOutputTokens,

@@ -22,9 +22,14 @@ export interface LLMProvider {
   /** Lists available models from the endpoint's /models (OpenAI-compatible). */
   listModels?(signal?: AbortSignal): Promise<string[]>;
 
-  supportsToolCalling(): boolean;
-  supportsStreaming(): boolean;
-  capabilities(): ModelCapabilities;
+  /**
+   * Whether the provider supports native tool calling. When the provider
+   * routes across multiple endpoints, pass the model to get the answer for
+   * the endpoint that serves it.
+   */
+  supportsToolCalling(model?: string): boolean;
+  supportsStreaming(model?: string): boolean;
+  capabilities(model?: string): ModelCapabilities;
 }
 
 /** Abstraction mirroring the spec's suggested interface. */

@@ -975,6 +975,39 @@ body {
   font-size: 13px;
 }
 
+/* ------------------------------------------------------------ endpoints */
+
+.endpoint-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 10px 0;
+  background: var(--bg-raised);
+}
+
+.endpoint-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.endpoint-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 12px;
+}
+
+.endpoint-indicator .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #4caf50);
+}
+
 /* ------------------------------------------------------------ history */
 
 .history-list {
@@ -1057,4 +1090,107 @@ body {
 
 .dev-list li.ok {
   color: var(--ok);
+}
+
+/* -------------------------------------------------------- exchange logs */
+
+.exchange-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.exchange-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.exchange-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.exchange-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.exchange-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  background: var(--bg-raised);
+  border: none;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.exchange-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-raised));
+}
+
+.exchange-detail {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.exchange-block h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.exchange-message {
+  margin-bottom: 6px;
+}
+
+.role-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-bottom: 2px;
+}
+
+.exchange-pre {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 3px;
+  padding: 1px 5px;
 }

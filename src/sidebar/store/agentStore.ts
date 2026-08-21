@@ -13,6 +13,7 @@ import type {
   ConfirmationRequest,
   ConversationRecord,
   DevEvent,
+  LLMExchangeLog,
   TokenUsageMetrics,
   ToolActivityRecord,
   Workspace,
@@ -36,6 +37,8 @@ interface AgentState {
   actionLog: ActionLogEntry[];
   pendingConfirmation: ConfirmationRequest | null;
   devEvents: DevEvent[];
+  /** Full request/response exchange logs for the dev panel export. */
+  exchangeLogs: LLMExchangeLog[];
   streamingText: string;
   busy: boolean;
   activeTabId?: number;
@@ -59,6 +62,8 @@ interface AgentState {
   deleteAllData(): Promise<void>;
   ensurePermissions(): Promise<void>;
   refreshDevEvents(): Promise<void>;
+  /** Fetches the buffered exchange logs from the background (dev panel export). */
+  refreshExchangeLogs(): Promise<void>;
   /** Fetches available models from the provider's /models endpoint. */
   fetchModels(): Promise<string[]>;
   /** Applies a pushed background event to the store (used by App shell). */
@@ -78,6 +83,7 @@ const initialState: Omit<AgentState, keyof AgentStateActions | "applyEvent"> & {
   actionLog: [],
   pendingConfirmation: null,
   devEvents: [],
+  exchangeLogs: [],
   streamingText: "",
   busy: false,
   activeTabId: undefined,
@@ -105,6 +111,7 @@ type AgentStateActions = Pick<
   | "deleteAllData"
   | "ensurePermissions"
   | "refreshDevEvents"
+  | "refreshExchangeLogs"
   | "fetchModels"
 >;
 
@@ -158,6 +165,7 @@ export const useAgentStore = create<AgentState>()((set, get) => {
           messages: [],
           activity: [],
           actionLog: [],
+          exchangeLogs: [],
           streamingText: "",
           tokenUsage: emptyTokenUsage(state.settings?.provider.contextLimitTokens ?? 0),
         }));
@@ -165,6 +173,13 @@ export const useAgentStore = create<AgentState>()((set, get) => {
       case "DEV_EVENT":
         if (get().settings?.devMode) {
           set((s) => ({ devEvents: [...s.devEvents, event.event].slice(-300) }));
+        }
+        break;
+      case "EXCHANGE_LOG":
+        // Exchange logs are only pushed when dev mode is on, but the buffer is
+        // always available via refreshExchangeLogs for users who toggle it on.
+        if (get().settings?.devMode) {
+          set((s) => ({ exchangeLogs: [...s.exchangeLogs, event.log].slice(-200) }));
         }
         break;
     }
@@ -277,6 +292,11 @@ export const useAgentStore = create<AgentState>()((set, get) => {
     async refreshDevEvents() {
       const res = (await runtime.send({ type: "GET_DEV_EVENTS" })) as { ok: boolean; devEvents?: DevEvent[] };
       if (res.ok && res.devEvents) set({ devEvents: res.devEvents });
+    },
+
+    async refreshExchangeLogs() {
+      const res = (await runtime.send({ type: "GET_EXCHANGE_LOGS" })) as { ok: boolean; exchangeLogs?: LLMExchangeLog[] };
+      if (res.ok && res.exchangeLogs) set({ exchangeLogs: res.exchangeLogs });
     },
 
     async fetchModels() {

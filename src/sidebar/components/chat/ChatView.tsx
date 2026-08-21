@@ -87,8 +87,16 @@ export function ChatView(): JSX.Element {
   const suggestedModels = settings?.provider.baseUrl.includes("deepseek.com")
     ? ["deepseek-chat", "deepseek-reasoner"]
     : [];
-  const availableModels = [...new Set([settings?.provider.model ?? "", ...suggestedModels, ...models])].filter(Boolean);
+  // Aggregate models from the primary provider plus every configured endpoint.
+  const endpointModels = (settings?.provider.endpoints ?? []).flatMap((ep) => ep.models);
+  const availableModels = [...new Set([settings?.provider.model ?? "", ...suggestedModels, ...endpointModels, ...models])].filter(Boolean);
   const hasRunningThinking = activity.some((item) => item.kind === "thinking" && item.status === "running");
+
+  // Which endpoint serves the currently selected model (for display).
+  const selectedModel = settings?.provider.model;
+  const selectedEndpoint = settings?.provider.endpoints?.find(
+    (ep) => (selectedModel !== undefined && ep.models.includes(selectedModel)) || ep.models.length === 0,
+  );
 
   const timeline = [
     ...messages
@@ -166,6 +174,12 @@ export function ChatView(): JSX.Element {
           >
             New chat
           </button>
+        </div>
+      )}
+
+      {settings && selectedEndpoint && (
+        <div className="endpoint-indicator" title={`${selectedEndpoint.baseUrl} — ${selectedEndpoint.name}`}>
+          <span className="dot" /> {selectedEndpoint.name || "Endpoint"} · {selectedEndpoint.baseUrl}
         </div>
       )}
 

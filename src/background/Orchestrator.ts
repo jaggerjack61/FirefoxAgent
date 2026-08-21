@@ -16,6 +16,7 @@ import type {
   ConfirmationRequest,
   ConversationRecord,
   DevEvent,
+  LLMExchangeLog,
   LLMUsage,
   TokenUsageMetrics,
   ToolActivityRecord,
@@ -48,6 +49,11 @@ export class BackgroundOrchestrator {
   private activity: ToolActivityRecord[] = [];
   private actionLog: ActionLogEntry[] = [];
   private devEvents: DevEvent[] = [];
+  /**
+   * Full request/response exchange logs for the dev panel's export feature.
+   * Scoped to the current conversation; cleared on new/clear conversation.
+   */
+  private exchangeLogs: LLMExchangeLog[] = [];
   private tokenUsage: TokenUsageMetrics;
   private runtimeState: AgentRuntimeState = { status: "idle", iterations: 0 };
   private listeners = new Set<(event: BackgroundEvent) => void>();
@@ -89,6 +95,7 @@ export class BackgroundOrchestrator {
       getPromptCacheKey: () => `browser-agent-v1:${this.conversation?.id ?? this.workspace.getWorkspace()?.conversationId ?? "session"}`,
       reportUsage: (usage, estimatedInput, estimatedOutput, contextLimit) =>
         this.recordUsage(usage, estimatedInput, estimatedOutput, contextLimit),
+      recordExchange: (log) => this.recordExchange(log),
     });
   }
 
@@ -132,6 +139,19 @@ export class BackgroundOrchestrator {
     this.devEvents.push(event);
     if (this.devEvents.length > 500) this.devEvents.shift();
     if (this.settings.devMode) this.broadcast({ type: "DEV_EVENT", event });
+  }
+
+  /**
+   * Records a full LLM exchange (request messages incl. page snapshots + the
+   * provider response) for the dev panel's export feature. Logs are scoped to
+   * the current conversation and cleared when a new chat is started. Only
+   * forwarded to the sidebar when dev mode is enabled, but always buffered so
+   * a user who toggles dev mode on mid-conversation can still export.
+   */
+  private recordExchange(log: LLMExchangeLog): void {
+    this.exchangeLogs.push(log);
+    if (this.exchangeLogs.length > 200) this.exchangeLogs.shift();
+    if (this.settings.devMode) this.broadcast({ type: "EXCHANGE_LOG", log });
   }
 
   // -------------------------------------------------------------------------
@@ -221,6 +241,7 @@ export class BackgroundOrchestrator {
   async newWorkspace(name?: string): Promise<Workspace> {
     const ws = await this.workspace.newWorkspace(name);
     this.messages = [];
+    this.exchangeLogs = [];
     this.resetTokenUsage();
     this.runtime.setConversation([]);
     return ws;
@@ -303,6 +324,7 @@ export class BackgroundOrchestrator {
     this.messages = [];
     this.activity = [];
     this.actionLog = [];
+    this.exchangeLogs = [];
     this.tokenUsage = emptyTokenUsage(this.settings.provider.contextLimitTokens);
     this.runtime.setConversation([]);
     await this.store.saveConversation(conv);
@@ -321,6 +343,7 @@ export class BackgroundOrchestrator {
     this.messages = [];
     this.activity = [];
     this.actionLog = [];
+    this.exchangeLogs = [];
     this.resetTokenUsage();
     this.runtime.setConversation([]);
     conv.messageIds = [];
@@ -340,6 +363,7 @@ export class BackgroundOrchestrator {
     this.activity = [];
     this.actionLog = [];
     this.devEvents = [];
+    this.exchangeLogs = [];
     this.resetTokenUsage();
     this.conversation = null;
     this.runtime.setConversation([]);
@@ -353,6 +377,11 @@ export class BackgroundOrchestrator {
 
   getDevEvents(): DevEvent[] {
     return this.devEvents.slice(-200).map((e) => redact(e) as DevEvent);
+  }
+
+  /** Full request/response exchange logs for the dev panel export. */
+  getExchangeLogs(): LLMExchangeLog[] {
+    return this.exchangeLogs.slice().map((log) => redact(log) as LLMExchangeLog);
   }
 
   getActionLog(): ActionLogEntry[] {

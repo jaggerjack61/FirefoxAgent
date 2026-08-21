@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     // deepseek-chat offers a 64K context window.
     contextLimitTokens: 64_000,
     timeoutMs: 60_000,
+    endpoints: [],
   },
   mode: "agent",
   limits: {

@@ -62,6 +62,8 @@ export interface LLMRequest {
   cacheKey?: string;
   /** Marks the leading system/developer content as a reusable cache prefix. */
   cacheStablePrefix?: boolean;
+  /** Model to serve this request. When omitted, the provider's configured model is used. */
+  model?: string;
 }
 
 export type StreamEvent =
@@ -90,6 +92,26 @@ export interface ModelCapabilities {
 export type ProviderProtocol = "chat_completions" | "responses";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
+/**
+ * A single provider endpoint (base URL + key) that serves a set of models.
+ * Used for multi-endpoint routing: each model request is sent to the
+ * endpoint that lists that model.
+ */
+export interface ProviderEndpoint {
+  /** Stable id used as a React key and for routing bookkeeping. */
+  id: string;
+  /** Human-readable label, e.g. "OpenAI", "Ollama (local)". */
+  name: string;
+  /** e.g. https://api.openai.com/v1 — the protocol path is appended. */
+  baseUrl: string;
+  apiKey: string;
+  /** Models served by this endpoint. Empty array = serves any model. */
+  models: string[];
+  protocol: ProviderProtocol;
+  customHeaders: Record<string, string>;
+  timeoutMs: number;
+}
+
 export interface ProviderConfig {
   name: string;
   /** e.g. https://api.openai.com/v1 — the protocol path is appended. */
@@ -106,6 +128,12 @@ export interface ProviderConfig {
   timeoutMs: number;
   /** Optional capability overrides (auto-detected by default). */
   capabilitiesOverride?: Partial<ModelCapabilities>;
+  /**
+   * Optional multi-endpoint routing table. When present, each model request
+   * is routed to the endpoint that serves the requested model; the top-level
+   * baseUrl/apiKey/model act as the fallback for unlisted models.
+   */
+  endpoints?: ProviderEndpoint[];
 }
 
 // ---------------------------------------------------------------------------
@@ -327,3 +355,31 @@ export type DevEvent =
   | { kind: "snapshot"; ts: number; tabId: number; url: string; elements: number; textChars: number }
   | { kind: "confirmation"; ts: number; tool: string; approved: boolean; highRisk: boolean }
   | { kind: "error"; ts: number; code: string; message: string };
+
+/**
+ * A full request/response exchange log for the dev panel's export feature.
+ * Captures the exact messages sent to the provider (including page snapshots
+ * embedded in the runtime-context block) and the response returned, so the
+ * user can audit what was sent and received. Logs are scoped to the current
+ * conversation and cleared when a new chat is started.
+ */
+export interface LLMExchangeLog {
+  /** Stable id for React keys. */
+  id: string;
+  /** Epoch milliseconds when the request was dispatched. */
+  ts: number;
+  /** Wall-clock latency of the provider call, in milliseconds. */
+  latencyMs: number;
+  /** Model the request was routed to. */
+  model: string;
+  /** The exact message array sent to the provider (system + conversation + runtime context). */
+  requestMessages: LLMMessage[];
+  /** Tool definitions advertised to the model (omitted when not using native tools). */
+  requestTools?: LLMToolDef[];
+  /** The provider's raw response (content, tool calls, finish reason, usage). */
+  response: LLMResponse;
+  /** Whether the request was forced into a final-answer turn (action budget exhausted). */
+  forceFinal: boolean;
+  /** Whether the request ran in structured-output fallback mode (no native tools). */
+  fallbackMode: boolean;
+}

@@ -9,6 +9,7 @@ import type {
   ChatMessageRecord,
   ConfirmationRequest,
   DevEvent,
+  LLMExchangeLog,
   TokenUsageMetrics,
   ToolActivityRecord,
   Workspace,
@@ -27,7 +28,8 @@ export type BackgroundEvent =
   | { type: "WORKSPACE_CHANGED"; workspace: Workspace }
   | { type: "ACTION_LOG"; entry: ActionLogEntry }
   | { type: "CONVERSATION_RESET"; conversationId: string }
-  | { type: "DEV_EVENT"; event: DevEvent };
+  | { type: "DEV_EVENT"; event: DevEvent }
+  | { type: "EXCHANGE_LOG"; log: LLMExchangeLog };
 
 export interface EventEnvelope {
   event: true;

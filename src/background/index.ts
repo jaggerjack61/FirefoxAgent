@@ -175,6 +175,9 @@ async function router(message: unknown, sender: browser.runtime.MessageSender): 
       case "GET_DEV_EVENTS":
         return { ok: true, devEvents: orchestrator.getDevEvents() };
 
+      case "GET_EXCHANGE_LOGS":
+        return { ok: true, exchangeLogs: orchestrator.getExchangeLogs() };
+
       case "FETCH_MODELS":
         return { ok: true, models: await orchestrator.listModels() };
 

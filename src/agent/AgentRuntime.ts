@@ -9,7 +9,7 @@
  * do and performs it.
  */
 
-import type { ActionLogEntry, AppSettings, LLMMessage, LLMResponse, LLMUsage, ToolCall } from "@/shared/types";
+import type { ActionLogEntry, AppSettings, LLMExchangeLog, LLMMessage, LLMResponse, LLMUsage, ToolCall } from "@/shared/types";
 import type { LLMProvider } from "@/providers/LLMProvider";
 import type { ToolRegistry } from "@/tools/ToolRegistry";
 import type { WorkspaceManager } from "@/workspace/WorkspaceManager";
@@ -43,6 +43,12 @@ export interface AgentRuntimeDeps {
   getPromptCacheKey?: () => string;
   /** Records actual provider usage, falling back to runtime estimates when absent. */
   reportUsage?: (usage: LLMUsage | undefined, estimatedInputTokens: number, estimatedOutputTokens: number, contextLimitTokens: number) => Promise<void> | void;
+  /**
+   * Records a full request/response exchange for the dev panel's export
+   * feature. Captures the exact messages (including page snapshots) sent to
+   * the provider and the response returned. Only called when dev mode is on.
+   */
+  recordExchange?: (log: LLMExchangeLog) => void;
 }
 
 export interface RunResult {
@@ -168,7 +174,7 @@ export class AgentRuntime {
         actions += allowedCalls.length;
 
         let executed: Array<{ call: ToolCall } & ToolExecutionResult>;
-        const canRunInParallel = this.deps.provider.capabilities().parallelTools
+        const canRunInParallel = this.deps.provider.capabilities(settings.provider.model).parallelTools
           && allowedCalls.length > 1
           && allowedCalls.every((call) => isReadOnlyTool(call.name));
         if (canRunInParallel) {
@@ -277,7 +283,7 @@ export class AgentRuntime {
     const started = Date.now();
 
     const provider = this.deps.provider;
-    const useTools = !forceFinal && provider.supportsToolCalling() && context.toolDefs.length > 0;
+    const useTools = !forceFinal && provider.supportsToolCalling(settings.provider.model) && context.toolDefs.length > 0;
     const fallbackMode = !forceFinal && !useTools;
     const finalInstruction: LLMMessage = {
       role: "user",
@@ -293,6 +299,7 @@ export class AgentRuntime {
       maxOutputTokens: settings.provider.maxOutputTokens,
       cacheKey: this.deps.getPromptCacheKey?.(),
       cacheStablePrefix: true,
+      model: settings.provider.model,
     };
 
     this.deps.emitDev({
@@ -341,6 +348,21 @@ export class AgentRuntime {
       usage: response.usage,
     });
 
+    // Record the full exchange (request messages incl. page snapshots + the
+    // provider response) for the dev panel's export feature. The orchestrator
+    // only forwards this when dev mode is enabled.
+    this.deps.recordExchange?.({
+      id: newId("xchg"),
+      ts: started,
+      latencyMs: Date.now() - started,
+      model: settings.provider.model,
+      requestMessages: request.messages,
+      requestTools: request.tools,
+      response,
+      forceFinal,
+      fallbackMode,
+    });
+
     return response;
   }
 
@@ -354,7 +376,7 @@ export class AgentRuntime {
     // Trusted page-scope enforcement still rejects tools the user did not
     // authorize for the current task.
     const toolDefs = this.deps.registry.llmToolDefs();
-    const nativeTools = this.deps.provider.supportsToolCalling();
+    const nativeTools = this.deps.provider.supportsToolCalling(settings.provider.model);
     const toolDescriptions = nativeTools
       ? this.deps.registry.toolDescriptions()
       : this.deps.registry.toolDescriptions(undefined, true);

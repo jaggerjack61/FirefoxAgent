@@ -17,6 +17,7 @@ import type {
   ConfirmationRequest,
   ConversationRecord,
   DevEvent,
+  LLMExchangeLog,
   TokenUsageMetrics,
   ToolActivityRecord,
   Workspace,
@@ -49,7 +50,8 @@ export type SidebarRequest =
   | { type: "DELETE_ALL_LOCAL_DATA" }
   | { type: "ENSURE_PERMISSIONS" }
   | { type: "FETCH_MODELS" }
-  | { type: "GET_DEV_EVENTS" };
+  | { type: "GET_DEV_EVENTS" }
+  | { type: "GET_EXCHANGE_LOGS" };
 
 export interface BootstrapPayload {
   settings: AppSettings;
@@ -74,6 +76,7 @@ export type SidebarResponse =
   | { ok: true; accepted: boolean }
   | { ok: true; models: string[] }
   | { ok: true; devEvents: DevEvent[] }
+  | { ok: true; exchangeLogs: LLMExchangeLog[] }
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
