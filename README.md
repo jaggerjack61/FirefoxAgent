@@ -98,7 +98,7 @@ Models without native function calling are supported through an optional **struc
 | `webRequest` | Per-tab fetch/XHR/beacon completion tracking for bounded network-idle readiness; request bodies and headers are not read or stored |
 | `optional_host_permissions: <all_urls>` | **Not required at install** — requested at runtime when you grant site access |
 
-See [SECURITY.md](SECURITY.md) for the full threat model.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full threat model and security design.
 
 ## Development
 
@@ -127,7 +127,7 @@ src/
 └── shared/         # types, message protocol, errors, tokens, redaction
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) and [TESTING.md](TESTING.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full architecture and testing overview.
 
 ## Privacy
 
