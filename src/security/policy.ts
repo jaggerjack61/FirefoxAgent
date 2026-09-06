@@ -15,7 +15,14 @@ export interface TargetDescriptor {
   kind?: "navigation" | "control" | "unknown";
 }
 
-const READ_TOOLS = new Set<ToolName>(["list_tabs", "list_frames", "read_page", "wait_for"]);
+const READ_TOOLS = new Set<ToolName>([
+  "list_tabs",
+  "list_frames",
+  "read_page",
+  "wait_for",
+  "search_history",
+  "search_bookmarks",
+]);
 const NAVIGATION_TOOLS = new Set<ToolName>(["open_tab", "activate_tab", "navigate", "go_back", "reload"]);
 const REVERSIBLE_TOOLS = new Set<ToolName>(["fill", "select", "set_checked"]);
 

@@ -42,7 +42,7 @@ Providers receive only `PromptCompilation`; they do not construct conversation c
 6. the current request;
 7. current-run tool results and explicit page reads.
 
-Initial context has the user request and active-tab metadata only. Page text enters context solely through `read_page`; metadata for other tabs enters through `list_tabs`.
+Initial context has the user request and active-tab metadata only. Page text enters context solely through `read_page`; metadata for other tabs enters through `list_tabs`; local history and bookmark matches enter only through explicit `search_history`/`search_bookmarks` calls.
 
 Each `ContextSegment` has a stable content hash, token estimate, priority, and required flag. Required material must fit the hard limit. Optional page excerpts, chatter, notes, and history are admitted only within the soft limit. Chat history can be converted into a strict provider-generated compacted checkpoint; Responses endpoints can use native compaction when their connection test proved the request option is accepted. There is no automatic provider truncation.
 
@@ -56,7 +56,7 @@ Local settings contain named provider/key profiles and an active ID. `provider` 
 
 ## Stable provider prefix
 
-`CORE_INSTRUCTIONS` and the 15 definitions in `src/tools/definitions.ts` are deterministic and versioned. Their exact hashes and reviewed token counts live in `src/test/fixtures/stable-budget.json`. Tests fail on byte changes and on unreviewed growth above 10%.
+`CORE_INSTRUCTIONS` and the 17 definitions in `src/tools/definitions.ts` are deterministic and versioned. Their exact hashes and reviewed token counts live in `src/test/fixtures/stable-budget.json`. Tests fail on byte changes and on unreviewed growth above 10%.
 
 For Responses requests, the developer block is first, followed by dynamic messages and stateless output-item chaining with `store: false`. Function outputs retain their `call_id`; unknown reasoning and compaction items are preserved opaquely. When accepted, a single explicit cache breakpoint follows the stable developer block, and the cache key is derived from prompt version, tool-schema version, protocol, and model. Page data always follows that breakpoint.
 
@@ -80,7 +80,7 @@ Page content and tool results are untrusted data under the stable developer inst
 
 The content script exposes labels, roles, non-sensitive state, and explicit page excerpts. It never includes existing text-field values. Password, OTP, verification-code, and payment-field descriptors are marked sensitive. Action values and provider secrets are redacted before persistence.
 
-The manifest has only `storage`, `tabs`, and `scripting`, plus optional `<all_urls>` access requested during onboarding. There is no remote code or web-accessible extension resource.
+The manifest has only `storage`, `tabs`, `scripting`, `history`, and `bookmarks`, plus optional `<all_urls>` access requested during onboarding. There is no remote code or web-accessible extension resource. History and bookmark search results are read-only, HTTP(S)-filtered tool results treated as untrusted data.
 
 ## Verification
 

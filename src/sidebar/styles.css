@@ -52,12 +52,16 @@ button:disabled {
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-width: 280px;
+  min-width: 0;
+  overflow: hidden;
 }
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 8px;
   padding: 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
@@ -71,6 +75,8 @@ button:disabled {
   min-width: 0;
 }
 .topbar-actions {
+  margin-left: auto;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px !important;
 }
@@ -136,12 +142,26 @@ button:disabled {
 }
 .content {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 .loading {
   padding: 24px;
   color: var(--muted);
+}
+
+.tabs,
+.banner,
+.yolo-warning,
+.model-bar,
+.composer {
+  flex-shrink: 0;
+}
+.banner {
+  overflow-wrap: anywhere;
+  max-height: 20vh;
+  overflow-y: auto;
 }
 
 .chat {
@@ -158,6 +178,10 @@ button:disabled {
   flex-direction: column;
   gap: 10px;
 }
+.messages > * {
+  flex-shrink: 0;
+  min-width: 0;
+}
 .intro {
   margin: auto;
   max-width: 260px;
@@ -167,7 +191,7 @@ button:disabled {
   max-width: 92%;
   padding: 10px 12px;
   border-radius: 10px;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .message small {
   display: block;
@@ -195,6 +219,7 @@ button:disabled {
   border: 1px solid var(--border);
 }
 .message pre,
+.thinking pre,
 .confirmation pre {
   overflow-x: auto;
   padding: 8px;
@@ -203,11 +228,36 @@ button:disabled {
   font-size: 12px;
   white-space: pre-wrap;
 }
-.message code {
+.message img,
+.thinking img {
+  max-width: 100%;
+  height: auto;
+}
+.message table,
+.thinking table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.message th,
+.message td,
+.thinking th,
+.thinking td {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+}
+.message a,
+.thinking a {
+  color: var(--accent);
+}
+.message code,
+.thinking code {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 .thinking {
   width: 92%;
+  overflow-wrap: anywhere;
   align-self: flex-start;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -268,13 +318,18 @@ button:disabled {
 
 .composer {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: 7px;
   padding: 10px;
   background: var(--panel);
   border-top: 1px solid var(--border);
 }
+.composer:has(.stop) {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
 .composer textarea {
+  min-width: 0;
   min-height: 44px;
   max-height: 140px;
   resize: vertical;
@@ -326,6 +381,7 @@ select:focus {
   color: var(--muted);
 }
 .confirmation {
+  overflow-wrap: anywhere;
   align-self: stretch;
   padding: 11px;
   border: 1px solid var(--warning);
@@ -458,6 +514,9 @@ select:focus {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 7px;
   padding: 8px 10px;
+}
+.model-bar select {
+  min-width: 0;
 }
 .model-bar select:first-child {
   grid-column: 1 / -1;

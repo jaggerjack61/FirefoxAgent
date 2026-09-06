@@ -5,9 +5,9 @@ import { TOKEN_LIMITS, contentHash, estimateTokens } from "@/shared/token";
 import { STABLE_TOOL_JSON, TOOL_DEFINITIONS, TOOL_DEFINITION_TOKENS, parseToolInput } from "./definitions";
 
 describe("stable prompt and tool surface", () => {
-  it("keeps exactly 15 deterministic tools within budget", () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(15);
-    expect(new Set(TOOL_DEFINITIONS.map((tool) => tool.name)).size).toBe(15);
+  it("keeps exactly 17 deterministic tools within budget", () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(17);
+    expect(new Set(TOOL_DEFINITIONS.map((tool) => tool.name)).size).toBe(17);
     expect(TOOL_DEFINITION_TOKENS).toBeLessThanOrEqual(TOKEN_LIMITS.toolDefinitions);
     expect(estimateTokens(CORE_INSTRUCTIONS)).toBeLessThanOrEqual(TOKEN_LIMITS.developerPrompt);
   });

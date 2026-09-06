@@ -439,23 +439,23 @@ export function App() {
       <main className="content">
         {view === "chat" && (
           <section className="chat">
-            {!snapshot.settings.provider && (
-              <EmptyCard
-                title="Connect a model provider"
-                text="BrowserAgent sends requests directly from Firefox using your own endpoint and key."
-                action="Open settings"
-                onAction={() => setView("settings")}
-              />
-            )}
-            {!snapshot.hasSiteAccess && (
-              <EmptyCard
-                title="Allow website access"
-                text="Page tools need one Firefox permission covering all HTTP(S) sites."
-                action="Grant access"
-                onAction={() => void grantSiteAccess()}
-              />
-            )}
             <div className="messages">
+              {!snapshot.settings.provider && (
+                <EmptyCard
+                  title="Connect a model provider"
+                  text="BrowserAgent sends requests directly from Firefox using your own endpoint and key."
+                  action="Open settings"
+                  onAction={() => setView("settings")}
+                />
+              )}
+              {!snapshot.hasSiteAccess && (
+                <EmptyCard
+                  title="Allow website access"
+                  text="Page tools need one Firefox permission covering all HTTP(S) sites."
+                  action="Grant access"
+                  onAction={() => void grantSiteAccess()}
+                />
+              )}
               {snapshot.messages.length === 0 && (
                 <p className="muted intro">Ask about the active page, compare tabs, or complete a form.</p>
               )}

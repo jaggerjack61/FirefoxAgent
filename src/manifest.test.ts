@@ -7,7 +7,7 @@ const manifest = JSON.parse(readFileSync(resolve("static/manifest.json"), "utf8"
 describe("Firefox manifest", () => {
   it("has the minimal MV3 permission surface", () => {
     expect(manifest.manifest_version).toBe(3);
-    expect(manifest.permissions).toEqual(["storage", "tabs", "scripting"]);
+    expect(manifest.permissions).toEqual(["storage", "tabs", "scripting", "history", "bookmarks"]);
     expect(manifest.optional_host_permissions).toEqual(["<all_urls>"]);
     expect(JSON.stringify(manifest)).not.toMatch(/downloads|webRequest|webNavigation|activeTab/u);
   });

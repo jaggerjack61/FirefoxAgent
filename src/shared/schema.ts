@@ -267,6 +267,8 @@ export const toolNameSchema = z.enum([
   "read_page",
   "list_frames",
   "wait_for",
+  "search_history",
+  "search_bookmarks",
   "click",
   "fill",
   "select",

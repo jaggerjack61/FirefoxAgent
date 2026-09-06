@@ -171,6 +171,44 @@ export class FirefoxGateway {
         );
         return { output };
       }
+      case "search_history": {
+        const maxResults = Number(input.maxResults ?? 20);
+        const search: { text: string; maxResults: number; startTime?: number } = {
+          text: String(input.query ?? ""),
+          maxResults,
+        };
+        if (input.withinDays) search.startTime = Date.now() - Number(input.withinDays) * 86_400_000;
+        const items = await browser.history.search(search);
+        // Non-HTTP(S) history entries (file://, privileged pages) never enter model context.
+        const results = items
+          .filter((item) => item.url !== undefined && isWebUrl(item.url))
+          .slice(0, maxResults)
+          .map((item) => ({
+            url: item.url ?? "",
+            title: item.title ?? "",
+            lastVisitTime: item.lastVisitTime ?? 0,
+            visitCount: item.visitCount ?? 0,
+          }));
+        return { output: { results } };
+      }
+      case "search_bookmarks": {
+        const maxResults = Number(input.maxResults ?? 20);
+        const nodes = (await browser.bookmarks.search({ query: String(input.query ?? "") }))
+          .filter((node) => node.url !== undefined && isWebUrl(node.url))
+          .slice(0, maxResults);
+        const parentIds = [...new Set(nodes.flatMap((node) => (node.parentId ? [node.parentId] : [])))];
+        const parents = parentIds.length > 0 ? await browser.bookmarks.get(parentIds) : [];
+        const folders = new Map(parents.map((parent) => [parent.id, parent.title] as const));
+        return {
+          output: {
+            bookmarks: nodes.map((node) => ({
+              title: node.title,
+              url: node.url ?? "",
+              folder: node.parentId !== undefined ? (folders.get(node.parentId) ?? "") : "",
+            })),
+          },
+        };
+      }
       case "click":
       case "fill":
       case "select":

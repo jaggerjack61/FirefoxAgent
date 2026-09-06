@@ -77,7 +77,7 @@ export class ResponsesAdapter implements ProviderAdapter {
         handleEvent(safeJson(data));
       });
     } else {
-      const body = (await response.json()) as Record<string, unknown>;
+      const body = safeJson(await response.text());
       if (Array.isArray(body.output)) {
         if (body.status === "failed" || body.error) throw streamError(body);
         handleEvent({
@@ -105,12 +105,18 @@ export class ResponsesAdapter implements ProviderAdapter {
     }
     const status =
       finalResponse && typeof finalResponse.status === "string" ? finalResponse.status : "completed";
+    const incomplete = status === "incomplete" || chat.incomplete;
+    if (!text.trim() && toolCalls.length === 0 && !incomplete) {
+      throw new Error(
+        "Provider returned no text or tool calls. Check the API base URL, protocol, and model.",
+      );
+    }
     return {
       text,
       toolCalls,
       rawResponseOutput: rawOutput.length ? rawOutput : undefined,
       usage,
-      incomplete: status === "incomplete" || chat.incomplete,
+      incomplete,
     };
   }
 
@@ -170,16 +176,20 @@ export function buildResponsesPayload(request: ProviderRequest, stream: boolean)
   const payload: Record<string, unknown> = {
     model: request.settings.model,
     input,
-    tools: request.tools.map((tool) => ({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-      // Preserve optional/defaulted tool arguments across compatible endpoints.
-      strict: false,
-    })),
-    tool_choice: "auto",
-    parallel_tool_calls: false,
+    ...(request.tools.length > 0
+      ? {
+          tools: request.tools.map((tool) => ({
+            type: "function",
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+            // Preserve optional/defaulted tool arguments across compatible endpoints.
+            strict: false,
+          })),
+          tool_choice: "auto",
+          parallel_tool_calls: false,
+        }
+      : {}),
     stream,
     store: false,
     max_output_tokens: request.policy.outputReserve,

@@ -17,6 +17,8 @@ describe("browser action policy", () => {
     expect(classifyAction("fill")).toBe("reversible");
     expect(classifyAction("activate_tab")).toBe("navigation");
     expect(classifyAction("read_page")).toBe("read");
+    expect(classifyAction("search_history")).toBe("read");
+    expect(classifyAction("search_bookmarks")).toBe("read");
   });
 
   it("enforces each safety mode", () => {

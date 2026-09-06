@@ -12,7 +12,7 @@ import { TOKEN_LIMITS, contentHash, estimateTokens, lexicalScore, truncateToToke
 import { STABLE_TOOL_JSON } from "@/tools/definitions";
 
 export const PROMPT_VERSION = "browseragent-v2";
-export const TOOL_SCHEMA_VERSION = "browser-tools-v2";
+export const TOOL_SCHEMA_VERSION = "browser-tools-v3";
 
 export const CORE_INSTRUCTIONS = [
   "You are BrowserAgent, a concise Firefox assistant. Read and control pages only through tools.",

@@ -122,6 +122,84 @@ describe("Chat Completions adapter", () => {
     expect(fallback.usage).toMatchObject({ input: 10, output: 4, estimated: false });
   });
 
+  it("retries an explicit max_tokens rejection using max_completion_tokens without changing the budget", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+            },
+          }),
+          { status: 400 },
+        ),
+      )
+      .mockResolvedValueOnce(sseResponse([{ choices: [{ delta: { content: "OK" } }] }, "[DONE]"]));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = providerRequest("chat_completions");
+    const result = await new ChatCompletionsAdapter().stream(request, () => undefined);
+    expect(result.text).toBe("OK");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const payload = JSON.parse(String(fetchMock.mock.calls[1]?.[1].body));
+    expect(payload.max_completion_tokens).toBe(request.policy.outputReserve);
+    expect(payload.max_tokens).toBeUndefined();
+  });
+
+  it.each([400, 401, 429, 500])("does not retry unrelated HTTP %s errors", async (status) => {
+    const fetchMock = vi.fn(async () => new Response("Request rejected", { status }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      new ChatCompletionsAdapter().stream(providerRequest("chat_completions"), () => undefined),
+    ).rejects.toThrow("Request rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["<html>Sign in</html>", "null", "{}", '{"choices":[]}'])(
+    "rejects invalid or empty completion bodies: %s",
+    async (body) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(body)),
+      );
+      await expect(
+        new ChatCompletionsAdapter().stream(providerRequest("chat_completions"), () => undefined),
+      ).rejects.toThrow(/no text or tool calls.*base URL/);
+    },
+  );
+
+  it("rejects empty SSE streams instead of reporting a successful connection", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => sseResponse(["[DONE]"])),
+    );
+    await expect(
+      new ChatCompletionsAdapter().stream(providerRequest("chat_completions"), () => undefined),
+    ).rejects.toThrow("no text or tool calls");
+  });
+
+  it("preserves output-limit failures even when no text was produced", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => sseResponse([{ choices: [{ delta: {}, finish_reason: "length" }] }, "[DONE]"])),
+    );
+    const result = await new ChatCompletionsAdapter().stream(
+      providerRequest("chat_completions"),
+      () => undefined,
+    );
+    expect(result.incomplete).toBe(true);
+  });
+
+  it("omits tool controls when no tools are supplied", () => {
+    const request = providerRequest("chat_completions");
+    request.tools = [];
+    const payload = buildChatPayload(request);
+    expect(payload.tools).toBeUndefined();
+    expect(payload.tool_choice).toBeUndefined();
+    expect(payload.parallel_tool_calls).toBeUndefined();
+  });
+
   it("compacts into the strict configured JSON request", async () => {
     const fetchMock = vi.fn(
       async () =>

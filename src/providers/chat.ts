@@ -91,12 +91,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     onEvent: Parameters<ProviderAdapter["stream"]>[1],
   ): Promise<ProviderTurnResult> {
     const payload = buildChatPayload(request);
-    const response = await checkedFetch(providerEndpoint(request.settings, "chat/completions"), {
-      method: "POST",
-      headers: providerHeaders(request.settings),
-      body: JSON.stringify(payload),
-      signal: request.signal,
-    });
+    const response = await fetchChat(request, payload);
 
     const accumulator = new ChatStreamAccumulator();
     const emit = (fragments: string[]) => {
@@ -110,12 +105,17 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       });
     } else {
       // Gateway ignored `stream: true` and returned a complete completion.
-      emit(accumulator.feed((await response.json().catch(() => ({}))) as Record<string, unknown>));
+      emit(accumulator.feed(safeJson(await response.text())));
     }
 
     let usage = accumulator.usage ?? estimatedUsage(request.compilation.plan.estimatedInput);
     if (accumulator.usage) onEvent({ type: "usage", usage: accumulator.usage });
     const toolCalls = accumulator.toolCalls();
+    if (!accumulator.text.trim() && toolCalls.length === 0 && !accumulator.incomplete) {
+      throw new Error(
+        "Provider returned no text or tool calls. Check the API base URL, protocol, and model.",
+      );
+    }
     if (usage.estimated) {
       usage = {
         ...usage,
@@ -127,24 +127,19 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
   }
 
   async compact(request: CompactRequest): Promise<CompactResult> {
-    const response = await checkedFetch(providerEndpoint(request.settings, "chat/completions"), {
-      method: "POST",
-      headers: providerHeaders(request.settings),
-      signal: request.signal,
-      body: JSON.stringify({
-        model: request.settings.model,
-        stream: false,
-        max_tokens: 700,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "Compact the conversation into JSON with keys goal,constraints,observations,actions,unresolved,sources. Preserve facts and URLs. Maximum 700 tokens.",
-          },
-          ...request.messages.map(toChatMessage),
-        ],
-      }),
+    const response = await fetchChat(request, {
+      model: request.settings.model,
+      stream: false,
+      max_tokens: 700,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Compact the conversation into JSON with keys goal,constraints,observations,actions,unresolved,sources. Preserve facts and URLs. Maximum 700 tokens.",
+        },
+        ...request.messages.map(toChatMessage),
+      ],
     });
     const body = (await response.json()) as Record<string, unknown>;
     const choices = Array.isArray(body.choices) ? body.choices : [];
@@ -183,19 +178,55 @@ export function buildChatPayload(request: ProviderRequest): Record<string, unkno
     stream_options: { include_usage: true },
     max_tokens: request.policy.outputReserve,
     messages,
-    tools: request.tools.map((tool) => ({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        // Optional/defaulted arguments are validated locally, not a strict all-required schema.
-        strict: false,
-      },
-    })),
-    tool_choice: "auto",
-    parallel_tool_calls: false,
+    ...(request.tools.length > 0
+      ? {
+          tools: request.tools.map((tool) => ({
+            type: "function",
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters,
+              // Optional/defaulted arguments are validated locally, not a strict all-required schema.
+              strict: false,
+            },
+          })),
+          tool_choice: "auto",
+          parallel_tool_calls: false,
+        }
+      : {}),
   };
+}
+
+/** Keep legacy gateway compatibility, but honor models that explicitly require the newer token limit. */
+async function fetchChat(
+  request: Pick<ProviderRequest, "settings" | "signal">,
+  payload: Record<string, unknown>,
+): Promise<Response> {
+  const send = () =>
+    checkedFetch(providerEndpoint(request.settings, "chat/completions"), {
+      method: "POST",
+      headers: providerHeaders(request.settings),
+      body: JSON.stringify(payload),
+      signal: request.signal,
+    });
+  try {
+    return await send();
+  } catch (error) {
+    // Retry only an explicit request validation error, never a network/stream failure:
+    // those may already have generated output and incurred usage.
+    if (
+      !(error instanceof ProviderHttpError) ||
+      error.status !== 400 ||
+      !/\bmax_tokens\b/iu.test(error.message) ||
+      !/\bmax_completion_tokens\b/iu.test(error.message) ||
+      !/unsupported|not supported|not compatible/iu.test(error.message)
+    ) {
+      throw error;
+    }
+    payload.max_completion_tokens = payload.max_tokens;
+    delete payload.max_tokens;
+    return send();
+  }
 }
 
 function toChatMessage(message: { role: string; content: string }): Record<string, unknown> {

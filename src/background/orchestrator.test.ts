@@ -71,6 +71,99 @@ beforeEach(async () => {
   await repository.resetCurrentWorkspace();
 });
 
+describe("Provider connection checks", () => {
+  it("tests the real browser tool payload before probing optional endpoints", async () => {
+    const { orchestrator, stream } = await setup();
+    const countInput = vi.fn(async () => {
+      expect(stream).toHaveBeenCalledTimes(1);
+      return 100;
+    });
+    vi.mocked(providers.createProvider).mockReturnValue({ stream, countInput });
+    const tested = await orchestrator.handle({
+      version: 1,
+      requestId: "test",
+      type: "test_provider",
+      provider: providerRequest().settings,
+    });
+    expect(stream.mock.calls[0]?.[0].tools).toEqual(providerRequest().tools);
+    expect(tested).toMatchObject({ capabilities: { exactCounting: true }, message: "Done" });
+  });
+
+  it("does not mask connection errors with optional capability requests", async () => {
+    const { orchestrator, stream } = await setup();
+    const countInput = vi.fn();
+    stream.mockRejectedValue(new Error("Invalid API key"));
+    vi.mocked(providers.createProvider).mockReturnValue({ stream, countInput });
+    await expect(
+      orchestrator.handle({
+        version: 1,
+        requestId: "test",
+        type: "test_provider",
+        provider: providerRequest().settings,
+      }),
+    ).rejects.toThrow("Invalid API key");
+    expect(countInput).not.toHaveBeenCalled();
+  });
+
+  it("does not report an output-limited test as connected", async () => {
+    const { orchestrator, stream } = await setup();
+    stream.mockResolvedValue({ ...result(), incomplete: true });
+    await expect(
+      orchestrator.handle({
+        version: 1,
+        requestId: "test",
+        type: "test_provider",
+        provider: providerRequest().settings,
+      }),
+    ).rejects.toThrow("output limit");
+  });
+
+  it("times out a connection test even if the adapter ignores cancellation", async () => {
+    const { orchestrator, stream } = await setup();
+    stream.mockImplementation(() => new Promise<ProviderTurnResult>(() => undefined));
+    vi.useFakeTimers();
+    try {
+      const checked = expect(
+        orchestrator.handle({
+          version: 1,
+          requestId: "test",
+          type: "test_provider",
+          provider: providerRequest().settings,
+        }),
+      ).rejects.toThrow("connection test timed out");
+      await vi.waitFor(() => expect(stream).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(30_000);
+      await checked;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a successful connection when an optional capability probe hangs", async () => {
+    const { orchestrator, stream } = await setup();
+    const countInput = vi.fn(() => new Promise<number>(() => undefined));
+    vi.mocked(providers.createProvider).mockReturnValue({ stream, countInput });
+    vi.useFakeTimers();
+    try {
+      const checked = orchestrator.handle({
+        version: 1,
+        requestId: "test",
+        type: "test_provider",
+        provider: providerRequest().settings,
+      });
+      await vi.waitFor(() => expect(countInput).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(checked).resolves.toMatchObject({
+        capabilities: { exactCounting: false, explicitCaching: false, nativeCompaction: false },
+        message: "Done",
+      });
+      expect(stream).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("Orchestrator action lifecycle", () => {
   it("switches profiles explicitly, preserves separate credentials, and refuses mid-run changes", async () => {
     const { orchestrator, stream } = await setup();

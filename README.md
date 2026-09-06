@@ -2,7 +2,7 @@
 
 BrowserAgent is a token-first Firefox sidebar agent. It can discuss a page, work across tabs, and complete forms through a user-supplied OpenAI Responses or OpenAI-style Chat Completions endpoint.
 
-The v1 implementation is a scratch rewrite. Every provider request is compiled by one budget-aware context compiler; page content is never attached automatically, the model sees exactly 15 browser tools, and raw page bodies and form values are never retained as memory.
+The v1 implementation is a scratch rewrite. Every provider request is compiled by one budget-aware context compiler; page content is never attached automatically, the model sees exactly 17 browser tools, and raw page bodies and form values are never retained as memory.
 
 ## What it does
 
@@ -62,7 +62,7 @@ Defaults are deliberately conservative:
 | Workspace notes               |                     800 tokens |
 | Default / maximum page result |             900 / 2,000 tokens |
 | Other tool result             |                     120 tokens |
-| Tab/frame list result         |                     600 tokens |
+| Tab/frame/search list result  |                     600 tokens |
 | Compacted summary             |                     700 tokens |
 
 Provider-side automatic truncation is not used. Optional segments are omitted in priority order, older Chat Completions history is compacted only at the soft limit, and required context that cannot fit produces a visible budget error.
@@ -71,7 +71,9 @@ Provider-side automatic truncation is not used. Optional segments are omitted in
 
 The complete model-visible catalog is:
 
-`list_tabs`, `open_tab`, `activate_tab`, `close_tab`, `navigate`, `go_back`, `reload`, `read_page`, `list_frames`, `wait_for`, `click`, `fill`, `select`, `set_checked`, and `submit`.
+`list_tabs`, `open_tab`, `activate_tab`, `close_tab`, `navigate`, `go_back`, `reload`, `read_page`, `list_frames`, `wait_for`, `search_history`, `search_bookmarks`, `click`, `fill`, `select`, `set_checked`, and `submit`.
+
+`search_history` and `search_bookmarks` query local browsing history and saved bookmarks by title/URL text without opening pages. Results are bounded (50 items maximum, 600-token budget) and restricted to HTTP(S) URLs; both tools are read-only and never require confirmation. Using them requires the `history` and `bookmarks` Firefox permissions, which are requested at install.
 
 Use `read_page` with `mode: "controls"` to locate targets or `mode: "text"` for research (`all` is the default). All controls are paginated, not capped at the first 120. Continue with the returned `nextCursor`, keeping query, mode, and frame unchanged. Stale cursors and changed targets require a fresh read, not a guessed handle. Tiny budgets that cannot fit one complete item return an explicit error.
 

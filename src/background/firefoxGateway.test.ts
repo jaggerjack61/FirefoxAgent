@@ -88,6 +88,46 @@ describe("FirefoxGateway content delivery", () => {
     );
   });
 
+  it("searches history and keeps only HTTP(S) results", async () => {
+    const historySearch = vi.fn().mockResolvedValueOnce([
+      { id: "1", url: "https://example.test/a", title: "Example A", lastVisitTime: 1000, visitCount: 3 },
+      { id: "2", url: "file:///etc/hosts", title: "Local", lastVisitTime: 1000, visitCount: 1 },
+    ]);
+    vi.stubGlobal("browser", { history: { search: historySearch } });
+    const result = await gateway.execute("search_history", { query: "example", maxResults: 20 });
+    expect(historySearch).toHaveBeenCalledWith({ text: "example", maxResults: 20 });
+    expect(result.output.results).toEqual([
+      { url: "https://example.test/a", title: "Example A", lastVisitTime: 1000, visitCount: 3 },
+    ]);
+  });
+
+  it("bounds history searches to the requested relative time window", async () => {
+    const historySearch = vi.fn().mockResolvedValueOnce([]);
+    vi.stubGlobal("browser", { history: { search: historySearch } });
+    const before = Date.now();
+    await gateway.execute("search_history", { query: "", maxResults: 5, withinDays: 7 });
+    const query = historySearch.mock.calls[0]?.[0] as { text: string; startTime: number };
+    expect(query.text).toBe("");
+    const expected = before - 7 * 86_400_000;
+    expect(Math.abs(query.startTime - expected)).toBeLessThan(1_000);
+  });
+
+  it("searches bookmarks, maps parent folders, and keeps only HTTP(S) results", async () => {
+    const bookmarkSearch = vi.fn().mockResolvedValueOnce([
+      { id: "b1", parentId: "f1", title: "Docs", url: "https://docs.example.test" },
+      { id: "b2", parentId: "f1", title: "Bookmarklet", url: "javascript:void 0" },
+      { id: "f2", title: "A folder" },
+    ]);
+    const bookmarkGet = vi.fn().mockResolvedValueOnce([{ id: "f1", title: "Reading" }]);
+    vi.stubGlobal("browser", { bookmarks: { search: bookmarkSearch, get: bookmarkGet } });
+    const result = await gateway.execute("search_bookmarks", { query: "docs", maxResults: 10 });
+    expect(bookmarkSearch).toHaveBeenCalledWith({ query: "docs" });
+    expect(result.output.bookmarks).toEqual([
+      { title: "Docs", url: "https://docs.example.test", folder: "Reading" },
+    ]);
+    expect(bookmarkGet).toHaveBeenCalledWith(["f1"]);
+  });
+
   it("injects and retries when no content script received the command", async () => {
     sendMessage
       .mockRejectedValueOnce(new Error("Could not establish connection. Receiving end does not exist."))

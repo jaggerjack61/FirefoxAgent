@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "A token-first browser agent using your own AI provider.",
 
-  "permissions": ["storage", "tabs", "scripting"],
+  "permissions": ["storage", "tabs", "scripting", "history", "bookmarks"],
   "optional_host_permissions": ["<all_urls>"],
 
   "background": {

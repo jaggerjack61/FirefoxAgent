@@ -624,7 +624,7 @@ export class Orchestrator {
     const maximum =
       call.name === "read_page"
         ? Math.min(Number(input.maxTokens ?? TOKEN_LIMITS.defaultPageResult), TOKEN_LIMITS.maximumPageResult)
-        : ["list_tabs", "list_frames"].includes(call.name)
+        : ["list_tabs", "list_frames", "search_history", "search_bookmarks"].includes(call.name)
           ? 600
           : TOKEN_LIMITS.toolResult;
     return {
@@ -697,56 +697,69 @@ export class Orchestrator {
       trace: [],
     });
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const timeout = setTimeout(
+      () => controller.abort(new Error("Provider connection test timed out after 30 seconds")),
+      30_000,
+    );
     const baseRequest: ProviderRequest = {
       settings: { ...provider, capabilities: providerCapabilitiesSchema.parse({}) },
       compilation,
       baseMessages: compilation.messages,
       steps: [],
-      tools: [],
+      // Check the same tool schemas/options used by real runs, without executing any calls.
+      tools: TOOL_DEFINITIONS,
       policy,
       requestSequence: 0,
       signal: controller.signal,
     };
     try {
+      // Prove the basic connection first: optional endpoints must not consume the
+      // entire deadline before the first completion request is even attempted.
+      const result = await abortable(controller.signal, () => adapter.stream(baseRequest, () => undefined));
+      if (result.incomplete) {
+        throw new Error("The provider test reached its output limit. Increase the output reserve and retry.");
+      }
       let exactCounting = false;
       if (provider.protocol === "responses" && adapter.countInput) {
         try {
-          await adapter.countInput(baseRequest);
+          await abortable(controller.signal, () => adapter.countInput!(baseRequest));
           exactCounting = true;
         } catch {
           exactCounting = false;
         }
       }
-      const result = await adapter.stream(baseRequest, () => undefined);
       let explicitCaching = false;
       let nativeCompaction = false;
       if (provider.protocol === "responses") {
         try {
-          await adapter.stream(
-            {
-              ...baseRequest,
-              settings: {
-                ...baseRequest.settings,
-                capabilities: { ...baseRequest.settings.capabilities, explicitCaching: true },
+          await abortable(controller.signal, () =>
+            adapter.stream(
+              {
+                ...baseRequest,
+                settings: {
+                  ...baseRequest.settings,
+                  capabilities: { ...baseRequest.settings.capabilities, explicitCaching: true },
+                },
               },
-            },
-            () => undefined,
+              () => undefined,
+            ),
           );
           explicitCaching = true;
         } catch {
           explicitCaching = false;
         }
         try {
-          await adapter.stream(
-            {
-              ...baseRequest,
-              settings: {
-                ...baseRequest.settings,
-                capabilities: { ...baseRequest.settings.capabilities, nativeCompaction: true },
+          await abortable(controller.signal, () =>
+            adapter.stream(
+              {
+                ...baseRequest,
+                settings: {
+                  ...baseRequest.settings,
+                  capabilities: { ...baseRequest.settings.capabilities, nativeCompaction: true },
+                },
               },
-            },
-            () => undefined,
+              () => undefined,
+            ),
           );
           nativeCompaction = true;
         } catch {

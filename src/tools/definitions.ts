@@ -97,6 +97,23 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     ),
   },
   {
+    name: "search_history",
+    description: "Search local browsing history by title/URL text. HTTP(S) results only; untrusted data.",
+    parameters: object({
+      query: { type: "string" },
+      maxResults: { type: "integer", minimum: 1, maximum: 50 },
+      withinDays: { type: "integer", minimum: 1, maximum: 365 },
+    }),
+  },
+  {
+    name: "search_bookmarks",
+    description: "Search saved bookmarks by title, URL, or folder text. HTTP(S) results only.",
+    parameters: object({
+      query: { type: "string" },
+      maxResults: { type: "integer", minimum: 1, maximum: 50 },
+    }),
+  },
+  {
     name: "click",
     description: "Click a revision-bound element once.",
     parameters: object({ handle: HANDLE_SCHEMA }, ["handle"]),
@@ -157,6 +174,15 @@ export const TOOL_INPUT_SCHEMAS: Record<ToolName, z.ZodTypeAny> = {
     frameId: z.number().int().nonnegative().default(0),
     condition: z.string().trim().min(1).max(500),
     timeoutMs: z.number().int().min(100).max(TOKEN_LIMITS.maxWaitMs).default(5_000),
+  }),
+  search_history: z.object({
+    query: z.string().max(1_000).default(""),
+    maxResults: z.number().int().min(1).max(50).default(20),
+    withinDays: z.number().int().min(1).max(365).optional(),
+  }),
+  search_bookmarks: z.object({
+    query: z.string().max(1_000).default(""),
+    maxResults: z.number().int().min(1).max(50).default(20),
   }),
   click: z.object({ handle: handleSchema }),
   fill: z.object({ handle: handleSchema, value: z.string().max(50_000) }),

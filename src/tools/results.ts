@@ -4,7 +4,7 @@ import { estimateTokens, stableStringify, truncateToTokens } from "@/shared/toke
 export function serializeToolResult(output: Record<string, unknown>, maxTokens: number): string {
   const full = stableStringify(output);
   if (estimateTokens(full) <= maxTokens) return full;
-  for (const key of ["tabs", "frames"]) {
+  for (const key of ["tabs", "frames", "results", "bookmarks"]) {
     if (!Array.isArray(output[key])) continue;
     const entries = [...output[key]];
     const total = entries.length;

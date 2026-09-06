@@ -216,6 +216,38 @@ describe("Responses adapter", () => {
     );
   });
 
+  it.each(["<html>Sign in</html>", "null", "{}", '{"status":"completed","output":[]}'])(
+    "rejects invalid or empty Responses bodies: %s",
+    async (body) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(body)),
+      );
+      await expect(new ResponsesAdapter().stream(providerRequest(), () => undefined)).rejects.toThrow(
+        /no text or tool calls.*base URL/,
+      );
+    },
+  );
+
+  it("rejects empty SSE streams instead of reporting a successful connection", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => sseResponse(["[DONE]"])),
+    );
+    await expect(new ResponsesAdapter().stream(providerRequest(), () => undefined)).rejects.toThrow(
+      "no text or tool calls",
+    );
+  });
+
+  it("omits tool controls when no tools are supplied", () => {
+    const request = providerRequest();
+    request.tools = [];
+    const payload = buildResponsesPayload(request, true);
+    expect(payload.tools).toBeUndefined();
+    expect(payload.tool_choice).toBeUndefined();
+    expect(payload.parallel_tool_calls).toBeUndefined();
+  });
+
   it("uses the exact input-token endpoint when available", async () => {
     const fetchMock = vi.fn(async () => new Response('{"input_tokens":321}', { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);

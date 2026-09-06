@@ -6,7 +6,7 @@ describe("structured tool results", () => {
   it("keeps small outputs intact", () => {
     expect(JSON.parse(serializeToolResult({ status: "succeeded" }, 120))).toEqual({ status: "succeeded" });
   });
-  it.each(["tabs", "frames"])("bounds large %s lists without broken JSON", (key) => {
+  it.each(["tabs", "frames", "results", "bookmarks"])("bounds large %s lists without broken JSON", (key) => {
     const output = {
       [key]: Array.from({ length: 50 }, (_, index) => ({ id: index, title: "Title".repeat(20) })),
     };

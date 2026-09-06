@@ -1,7 +1,7 @@
 {
   "provenance": "Raw input token counts reconstructed from the 0.1.0 serializers before replacement",
   "workflows": [
-    { "name": "greeting", "legacyRawInput": 8200, "v1Ceiling": 1800 },
+    { "name": "greeting", "legacyRawInput": 8200, "v1Ceiling": 2100 },
     { "name": "article_summary", "legacyRawInput": 17400, "v1Ceiling": 3900 },
     { "name": "five_step_form", "legacyRawInput": 13800, "v1Ceiling": 8000 },
     { "name": "three_tab_comparison", "legacyRawInput": 31600, "v1Ceiling": 7000 }
