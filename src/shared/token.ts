@@ -11,7 +11,6 @@ export const TOKEN_LIMITS = {
   workspaceNotes: 800,
   recentPairs: 6,
   maxTurns: 12,
-  maximumThinkingTurns: 64,
   maxActions: 25,
   maxRunMs: 5 * 60_000,
   maxWaitMs: 15_000,

@@ -30,12 +30,7 @@ export const providerSettingsSchema = z.object({
     .max(2_000_000)
     .default(TOKEN_LIMITS.defaultContext),
   maxOutputTokens: z.number().int().min(256).max(128_000).default(TOKEN_LIMITS.defaultOutputReserve),
-  maxThinkingTurns: z
-    .number()
-    .int()
-    .min(1)
-    .max(TOKEN_LIMITS.maximumThinkingTurns)
-    .default(TOKEN_LIMITS.maxTurns),
+  maxThinkingTurns: z.number().int().min(1).default(TOKEN_LIMITS.maxTurns),
   capabilities: providerCapabilitiesSchema.default({}),
 });
 export type ProviderSettings = z.infer<typeof providerSettingsSchema>;

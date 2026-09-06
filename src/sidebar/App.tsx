@@ -760,17 +760,14 @@ export function App() {
                   <input
                     type="number"
                     min={1}
-                    max={TOKEN_LIMITS.maximumThinkingTurns}
                     value={provider.maxThinkingTurns}
                     onChange={(event) =>
                       setDraftProvider(setDraft, provider, {
-                        maxThinkingTurns: Math.min(
-                          TOKEN_LIMITS.maximumThinkingTurns,
-                          Math.max(1, Number(event.target.value) || 1),
-                        ),
+                        maxThinkingTurns: Math.max(1, Math.round(Number(event.target.value) || 1)),
                       })
                     }
                   />
+                  <span className="field-help">Any value — no upper limit</span>
                 </label>
               </div>
               <div className="prompt-budget">
