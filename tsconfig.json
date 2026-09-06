@@ -23,5 +23,12 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src", "e2e", "vitest.config.ts", "vite.config.ts", "playwright.config.ts"]
+  "include": [
+    "src",
+    "vitest.config.ts",
+    "vite.config.ts",
+    "vite.background.config.ts",
+    "vite.content.config.ts",
+    "vite.sidebar.config.ts"
+  ]
 }

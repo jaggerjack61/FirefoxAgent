@@ -3,5 +3,7 @@ dist/
 web-ext-artifacts/
 test-results/
 playwright-report/
+coverage/
+source-artifacts/
 *.log
 .DS_Store

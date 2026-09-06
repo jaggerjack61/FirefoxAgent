@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>BrowserAgent interaction fixture</title>
+    <style>
+      body {
+        font: 16px sans-serif;
+      }
+      button,
+      input,
+      select,
+      textarea {
+        margin: 8px;
+        padding: 8px;
+      }
+      .covered {
+        position: relative;
+        display: inline-block;
+      }
+      .cover {
+        position: absolute;
+        inset: 0;
+        background: #ccc;
+        z-index: 2;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Interaction fixture</h1>
+    <p id="long"></p>
+    <div>
+      <label>Profile name <input id="name" value="PRIVATE_INPUT_VALUE" /></label>
+    </div>
+    <div>
+      <label>Private notes <textarea id="private">PRIVATE_TEXTAREA_VALUE</textarea></label>
+    </div>
+    <div contenteditable="true">PRIVATE_EDITOR_VALUE</div>
+    <label>Account password <input type="password" value="PRIVATE_PASSWORD_VALUE" /></label>
+    <label>Controlled input <input id="controlled" /></label>
+    <label><input id="check" type="checkbox" /> Enable feature</label>
+    <label><input id="cancelled" type="checkbox" /> Cancelled checkbox</label>
+    <label
+      >City
+      <select id="city">
+        <option value="one">Duplicate</option>
+        <option value="two">Duplicate</option>
+        <option value="three">London</option>
+        <option disabled value="four">Disabled choice</option>
+      </select></label
+    >
+    <fieldset disabled><button>Disabled fieldset button</button></fieldset>
+    <div hidden><button>Hidden ancestor button</button></div>
+    <div class="covered">
+      <button id="covered">Covered button</button>
+      <div class="cover">Overlay</div>
+    </div>
+    <button id="toggle" aria-expanded="false">Expand details</button>
+    <a id="recycled" href="/safe">Continue link</a>
+    <form id="form">
+      <label>Form text <input id="formtext" /></label>
+    </form>
+    <div id="shadow"></div>
+    <div id="many"></div>
+    <script>
+      window.checkClicks = 0;
+      window.submissions = 0;
+      document.querySelector("#check").addEventListener("click", () => window.checkClicks++);
+      document.querySelector("#cancelled").addEventListener("click", (event) => event.preventDefault());
+      document.querySelector("#controlled").addEventListener("input", (event) =>
+        setTimeout(() => {
+          event.target.value = "reverted";
+        }, 30),
+      );
+      document
+        .querySelector("#toggle")
+        .addEventListener("click", (event) => event.target.setAttribute("aria-expanded", "true"));
+      document.querySelector("#form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        window.submissions++;
+      });
+      document.querySelector("#long").textContent = "Long research passage with Unicode 中文 😀. ".repeat(
+        400,
+      );
+      document.querySelector("#shadow").attachShadow({ mode: "open" }).innerHTML =
+        '<span id="shadowlabel">Shadow labelled button</span><button aria-labelledby="shadowlabel">Icon</button>';
+      for (let i = 0; i < 160; i++) {
+        const button = document.createElement("button");
+        button.textContent = "Indexed control " + i;
+        document.querySelector("#many").append(button);
+      }
+    </script>
+  </body>
+</html>

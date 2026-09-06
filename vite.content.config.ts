@@ -8,8 +8,8 @@ export default defineConfig({
   build: {
     outDir: "dist/content",
     emptyOutDir: true,
-    sourcemap: true,
-    minify: false,
+    sourcemap: false,
+    minify: "esbuild",
     lib: {
       entry: resolve(__dirname, "src/content/index.ts"),
       formats: ["iife"],

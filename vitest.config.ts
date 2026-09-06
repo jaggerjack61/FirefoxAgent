@@ -12,5 +12,17 @@ export default defineConfig({
     restoreMocks: true,
     mockReset: true,
     testTimeout: 10_000,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary"],
+      include: [
+        "src/context/**/*.ts",
+        "src/providers/**/*.ts",
+        "src/security/**/*.ts",
+        "src/shared/**/*.ts",
+        "src/tools/**/*.ts",
+      ],
+      thresholds: { lines: 80, functions: 80, branches: 75, statements: 80 },
+    },
   },
 });

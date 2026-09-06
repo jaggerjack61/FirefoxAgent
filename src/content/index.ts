@@ -1,209 +1,272 @@
-/**
- * Content script entry point. Handles typed messages from the background
- * script (snapshot building, interaction, extraction) and reports page
- * changes. It NEVER talks to the LLM or the network beyond the page itself.
- */
+import {
+  contentCommandSchema,
+  pageSnapshotSchema,
+  type ContentCommand,
+  type ElementHandle,
+  type PageElement,
+} from "@/shared/schema";
+import { abortableDelay } from "@/shared/abort";
+import { contentHash, lexicalScore } from "@/shared/token";
+import { HandleRegistry } from "./handleRegistry";
+import {
+  accessibleName,
+  collectRoots,
+  identityOf,
+  isDisabled,
+  isSensitive,
+  isVisible,
+  normalizeText,
+  safeText,
+  semanticRole,
+} from "./dom";
+import { paginateSnapshot, splitPassage, type SnapshotItem } from "./snapshot";
+import { performAction } from "./interactions";
 
-import type { ContentRequest, ContentResponse, FrameSnapshot, PageSnapshot } from "@/shared/contentProtocol";
-import { ToolError, type ErrorCode } from "@/shared/errors";
-import { ElementRegistry } from "./snapshot/registry";
-import { buildSnapshot, visibleViewportText } from "./snapshot/builder";
-import * as actions from "./interact/actions";
-import { extractTable, extractList, extractLinks, extractStructuredContent } from "./extract/extractors";
-import { DomObserver } from "./observers";
-
-const registry = new ElementRegistry();
-
-interface SnapshotOptions {
-  maxTextChars: number;
-  maxElements: number;
-  maxLinks: number;
-  includeValues: boolean;
+declare global {
+  interface Window {
+    __browserAgentContentV1?: boolean;
+  }
 }
 
-const DEFAULTS: SnapshotOptions = {
-  maxTextChars: 6_000,
-  maxElements: 120,
-  maxLinks: 200,
-  includeValues: false,
-};
+if (!window.__browserAgentContentV1) {
+  window.__browserAgentContentV1 = true;
+  installContentRuntime();
+}
 
-let currentSnapshot: PageSnapshot | null = null;
+function installContentRuntime(): void {
+  const handles = new HandleRegistry<Element>(identityOf);
+  const observer = new MutationObserver(() => handles.invalidate());
+  const observed = new WeakSet<Document | ShadowRoot>();
+  const roots = () => {
+    const result = collectRoots();
+    for (const root of result) {
+      if (observed.has(root)) continue;
+      observed.add(root);
+      observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true });
+    }
+    return result;
+  };
+  roots();
+  const flush = () => {
+    if (observer.takeRecords().length) handles.invalidate();
+  };
 
-function refreshSnapshot(opts: Partial<SnapshotOptions> = {}): PageSnapshot {
-  const merged = { ...DEFAULTS, ...opts };
-  currentSnapshot = buildSnapshot({
-    registry,
-    frameId: 0,
-    includeValues: merged.includeValues,
-    maxTextChars: merged.maxTextChars,
-    maxElements: merged.maxElements,
-    maxLinks: merged.maxLinks,
+  // In-flight act/wait work, so the background can cancel it on Stop even
+  // though Firefox message delivery itself is not abortable.
+  const operations = new Map<string, AbortController>();
+
+  browser.runtime.onMessage.addListener((raw: unknown) => {
+    const parsed = contentCommandSchema.safeParse(raw);
+    if (!parsed.success) return undefined;
+    const command = parsed.data;
+    // Keep errors as rejected responses, including synchronous validation failures.
+    return Promise.resolve().then(() => {
+      flush();
+      if (command.type === "cancel_operation") {
+        const controller = operations.get(command.operationId);
+        controller?.abort(new DOMException("Stopped", "AbortError"));
+        operations.delete(command.operationId);
+        return { cancelled: Boolean(controller) };
+      }
+      const operationId = "operationId" in command ? command.operationId : undefined;
+      let controller: AbortController | undefined;
+      if (operationId) {
+        controller = new AbortController();
+        operations.set(operationId, controller);
+      }
+      const task = Promise.resolve().then(() => dispatch(command, controller?.signal));
+      if (controller && operationId) {
+        void task.finally(() => {
+          if (operations.get(operationId) === controller) operations.delete(operationId);
+        });
+      }
+      return task;
+    });
   });
-  return currentSnapshot;
-}
 
-/** Builds a snapshot for a given frame (top frame aggregates nothing here). */
-function snapshotForFrame(frameId: number, opts: Partial<SnapshotOptions> = {}): FrameSnapshot {
-  return { frameId, snapshot: refreshSnapshot(opts) };
-}
-
-interface DispatchResult {
-  data?: unknown;
-  error?: { code: ErrorCode; message: string; suggestedAction?: string; newElementId?: string };
-}
-
-async function handle(request: ContentRequest): Promise<ContentResponse> {
-  try {
-    const result = await dispatch(request);
-    if (result.error) {
-      return { ok: false, error: result.error.code, message: result.error.message, suggestedAction: result.error.suggestedAction };
-    }
-    return { ok: true, data: result.data ?? null };
-  } catch (err) {
-    if (err instanceof ToolError) {
-      return { ok: false, error: err.code, message: err.message, suggestedAction: err.suggestedAction };
-    }
-    return { ok: false, error: "INTERNAL_ERROR", message: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-async function dispatch(request: ContentRequest): Promise<DispatchResult> {
-  switch (request.kind) {
-    case "get_snapshot": {
-      const snap = snapshotForFrame(request.frameId, request.opts).snapshot;
-      return { data: snap };
-    }
-    case "get_visible_text":
-      return { data: visibleViewportText(request.maxChars) };
-    case "get_links":
-      return { data: refreshSnapshot({ maxLinks: request.maxLinks }).links };
-    case "get_forms":
-      return { data: refreshSnapshot({ includeValues: request.includeValues }).forms };
-    case "get_structure":
-      return { data: refreshSnapshot().headings };
-    case "get_buttons":
-      return { data: refreshSnapshot().elements.filter((e) => e.role === "button").map((e) => ({ id: e.id, name: e.name, visible: e.visible })) };
-    case "get_inputs":
-      return { data: refreshSnapshot({ includeValues: request.includeValues ?? false }).elements.filter((e) => ["input", "textarea", "select", "textbox"].includes(e.role)) };
-    case "find_text": {
-      const results: { elementId: string; context: string }[] = [];
-      const regex = new RegExp(request.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      for (const el of document.querySelectorAll<HTMLElement>("p, h1, h2, h3, h4, h5, h6, li, td, span")) {
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (text && regex.test(text) && text.length < 500) {
-          const id = el.closest("[data-ffa-eid]")?.getAttribute("data-ffa-eid");
-          results.push({ elementId: id ?? "", context: text.slice(0, 300) });
-          if (results.length >= request.maxResults) break;
-        }
-      }
-      return { data: results };
-    }
-    case "click":
-      return actions.clickElement(registry, request.elementId);
-    case "focus":
-      return actions.focusElement(registry, request.elementId);
-    case "type_text":
-      return actions.typeText(registry, request.elementId, request.text);
-    case "clear_input":
-      return actions.clearInput(registry, request.elementId);
-    case "select_option":
-      return actions.selectOption(registry, request.elementId, request.value);
-    case "check":
-      return actions.setChecked(registry, request.elementId, request.checked);
-    case "scroll":
-      return actions.scrollBy(request.dx, request.dy);
-    case "scroll_to_element":
-      return actions.scrollToElement(registry, request.elementId);
-    case "hover":
-      return actions.hoverElement(registry, request.elementId);
-    case "press_key":
-      return actions.pressKey(registry, request.elementId, request.key);
-    case "restore_input":
-      return actions.restoreInput(registry, request.elementId);
-    case "undo_input":
-      return actions.restoreInput(registry, request.elementId);
-    case "get_input_history":
-      return actions.getInputHistory(registry, request.elementId);
-    case "extract_table":
-      return extractTable(request.maxRows, request.maxCols);
-    case "extract_list":
-      return extractList(request.maxItems);
-    case "extract_links":
-      return extractLinks(request.maxLinks, request.filter);
-    case "extract_structured_content":
-      return extractStructuredContent(request.maxChars);
-    case "describe_element": {
-      const el = registry.resolve(request.elementId);
-      if (!el) {
-        return { error: { code: "ELEMENT_NOT_FOUND", message: `Element ${request.elementId} no longer exists.`, suggestedAction: "Refresh the page snapshot." } };
-      }
-      return {
-        data: {
-          name: describeElementName(el),
-          role: describeElementRole(el),
-          tag: el.tagName.toLowerCase(),
-          type: el instanceof HTMLInputElement ? el.type : undefined,
-          checked: el instanceof HTMLInputElement ? el.checked : undefined,
-          inForm: !!el.closest("form"),
+  function dispatch(
+    command: Exclude<ContentCommand, { type: "cancel_operation" }>,
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> | Record<string, unknown> {
+    if (command.type === "snapshot")
+      return buildSnapshot(
+        command.tabId,
+        command.frameId,
+        command.query,
+        command.cursor,
+        command.maxTokens,
+        command.mode,
+      );
+    if (command.type === "describe") return describe(command.handle);
+    if (command.type === "act")
+      return performAction(
+        command.action,
+        () => {
+          flush();
+          return handles.resolve(command.handle);
         },
-      };
+        command.value,
+        signal,
+      );
+    return waitFor(command.condition, command.timeoutMs, signal);
+  }
+
+  function describe(handle: ElementHandle): Record<string, unknown> {
+    const element = handles.resolve(handle);
+    const role = semanticRole(element);
+    const href = element instanceof HTMLAnchorElement ? element.href : undefined;
+    return {
+      name: accessibleName(element).slice(0, 200),
+      role,
+      tag: element.tagName.toLowerCase(),
+      href,
+      kind: href ? "navigation" : ["button", "menuitem", "tab"].includes(role) ? "control" : "unknown",
+    };
+  }
+
+  function buildSnapshot(
+    tabId: number,
+    frameId: number,
+    query: string,
+    cursor: string | null,
+    maxTokens: number,
+    mode: "all" | "text" | "controls",
+  ) {
+    const items: SnapshotItem[] = [];
+    const seen = new Set<string>();
+    for (const root of roots()) {
+      if (mode !== "controls")
+        for (const element of root.querySelectorAll(
+          "body,main,article,section,h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,tr,div",
+        )) {
+          if (
+            !isVisible(element) ||
+            element.closest("input,textarea,select,[contenteditable]:not([contenteditable='false'])")
+          )
+            continue;
+          // Keep a container's own prose while its nested blocks are extracted separately.
+          const text = safeText(element, true);
+          if (text.length < 2 || seen.has(text)) continue;
+          seen.add(text);
+          const kind = /^H[1-6]$/u.test(element.tagName)
+            ? "heading"
+            : element.tagName === "LI"
+              ? "list"
+              : element.tagName === "TR"
+                ? "table"
+                : "text";
+          const boilerplate = element.closest("nav,header,footer,aside") ? 0.1 : 0;
+          for (const [index, passage] of splitPassage(text).entries()) {
+            const score = lexicalScore(query, passage) + (kind === "heading" ? 0.05 : 0) - boilerplate;
+            items.push({
+              block: { id: `b:${contentHash(text)}:${index}`, kind, text: passage, score },
+              score,
+            });
+          }
+        }
+      if (mode !== "text")
+        for (const element of root.querySelectorAll(
+          "a[href],button,input,textarea,select,summary,[role='button'],[role='link'],[role='checkbox'],[role='radio'],[role='switch'],[role='tab'],[role='menuitem'],[role='combobox'],[role='textbox']",
+        )) {
+          if (!isVisible(element)) continue;
+          const role = semanticRole(element);
+          const fullName = accessibleName(element);
+          const name = fullName.slice(0, 180);
+          const state: PageElement["state"] = {};
+          if (fullName.length > 180) state.nameTruncated = true;
+          if (isDisabled(element)) state.disabled = true;
+          for (const attribute of ["expanded", "checked", "selected", "required", "readonly", "invalid"]) {
+            const value = element.getAttribute(`aria-${attribute}`);
+            if (value !== null) state[attribute] = value;
+          }
+          if (element instanceof HTMLInputElement) {
+            state.type = element.type;
+            if (["checkbox", "radio"].includes(element.type)) state.checked = element.checked;
+            if (isSensitive(element)) state.sensitive = true;
+          }
+          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+            if (element.readOnly) state.readonly = true;
+          }
+          if (
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLTextAreaElement ||
+            element instanceof HTMLSelectElement
+          ) {
+            if (element.required) state.required = true;
+          }
+          if (element instanceof HTMLSelectElement) {
+            // Expose choices, never the existing selected value. Query ranks large option lists.
+            const options = [...element.options].sort(
+              (a, b) => lexicalScore(query, b.text) - lexicalScore(query, a.text),
+            );
+            state.options = JSON.stringify(
+              options.slice(0, 6).map((option) => ({
+                // Never invent a clipped option value that cannot be selected.
+                ...(option.value.length <= 80 ? { value: option.value } : { valueOmitted: true }),
+                label: normalizeText(option.text).slice(0, 120),
+                ...(normalizeText(option.text).length > 120 ? { labelTruncated: true } : {}),
+                disabled:
+                  option.disabled ||
+                  (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled),
+              })),
+            );
+            if (options.length > 6)
+              state.optionsHint = `${options.length} choices; query an option label to find more`;
+          }
+          if (element instanceof HTMLAnchorElement) {
+            state.href = element.href.slice(0, 240);
+            if (element.href.length > 240) state.hrefTruncated = true;
+          }
+          const score = lexicalScore(query, `${role} ${fullName} ${state.options ?? ""}`) + 0.02;
+          items.push({
+            element: { handle: handles.bind(element, tabId, frameId), role, name, state },
+            score,
+          });
+        }
     }
-    default: {
-      const exhaustive: never = request;
-      throw new ToolError("INTERNAL_ERROR", `Unknown content request: ${JSON.stringify(exhaustive)}`);
-    }
+    items.sort((a, b) => b.score - a.score); // Stable tie order preserves document order.
+    const warnings = document.querySelector("iframe")
+      ? ["Subframes are not included; use a separate frameId read."]
+      : [];
+    const snapshot = paginateSnapshot(
+      {
+        tabId,
+        frameId,
+        revision: handles.revision,
+        url: location.href,
+        title: document.title.slice(0, 180),
+        query,
+        warnings,
+      },
+      items,
+      cursor,
+      maxTokens,
+      mode,
+    );
+    return pageSnapshotSchema.parse(snapshot);
+  }
+
+  async function waitFor(
+    condition: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const wanted = normalizeText(condition).toLowerCase();
+    if (!wanted) throw new Error("Wait condition must be non-empty visible text");
+    const deadline = Date.now() + timeoutMs;
+    // Poll at a bounded rate: this also catches visibility/property changes and shadow DOM.
+    do {
+      if (
+        roots().some((root) => {
+          const containers = root instanceof Document ? (root.body ? [root.body] : []) : [...root.children];
+          return containers.some(
+            (element) => isVisible(element) && safeText(element).toLowerCase().includes(wanted),
+          );
+        })
+      )
+        return { matched: true };
+      await abortableDelay(Math.min(200, Math.max(0, deadline - Date.now())), signal);
+    } while (Date.now() < deadline);
+    return { matched: false, reason: "timeout" };
   }
 }
-
-// ---------------------------------------------------------------------------
-// Boot
-// ---------------------------------------------------------------------------
-
-function describeElementName(el: Element): string {
-  const aria = el.getAttribute("aria-label");
-  if (aria?.trim()) return aria.trim();
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-    if (el.id) {
-      const label = document.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(el.id)}"]`);
-      if (label?.textContent?.trim()) return label.textContent.trim();
-    }
-    const wrapped = el.closest("label");
-    if (wrapped?.textContent?.trim()) return wrapped.textContent.trim();
-    const ph = el.getAttribute("placeholder");
-    if (ph?.trim()) return ph.trim();
-    if (el instanceof HTMLInputElement && el.type === "password") return "password field";
-    return el.name || el.type || el.tagName.toLowerCase();
-  }
-  return (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
-}
-
-function describeElementRole(el: Element): string {
-  const explicit = el.getAttribute("role");
-  if (explicit) return explicit;
-  if (el instanceof HTMLButtonElement) return "button";
-  if (el instanceof HTMLAnchorElement) return "link";
-  if (el instanceof HTMLInputElement) {
-    if (el.type === "checkbox") return "checkbox";
-    if (el.type === "radio") return "radio";
-    if (el.type === "submit" || el.type === "button" || el.type === "reset") return "button";
-    return "input";
-  }
-  if (el instanceof HTMLSelectElement) return "select";
-  if (el instanceof HTMLTextAreaElement) return "textarea";
-  return el.tagName.toLowerCase();
-}
-
-// Notify the background of SPA navigations and DOM rewrites.
-new DomObserver((reason) => {
-  void browser.runtime.sendMessage({ type: "PAGE_CHANGED", url: location.href, reason });
-}).start();
-
-browser.runtime.onMessage.addListener((message: unknown, _sender) => {
-  const request = message as ContentRequest;
-  if (!request || typeof request !== "object" || !("kind" in request)) return undefined;
-  return handle(request);
-});
-
-// Expose nothing to the page: no globals, no secrets, no DOM hooks beyond
-// the data-ffa-eid attributes (harmless page-visible ids).

@@ -1,7 +1,12 @@
+import React from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./components/App";
+import { App } from "./App";
 import "./styles.css";
 
-const container = document.getElementById("root");
-if (!container) throw new Error("Missing #root element");
-createRoot(container).render(<App />);
+const root = document.getElementById("root");
+if (!root) throw new Error("Sidebar root element is missing");
+createRoot(root).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);

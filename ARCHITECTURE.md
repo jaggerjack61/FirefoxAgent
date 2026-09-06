@@ -1,156 +1,89 @@
-# Architecture
+# BrowserAgent v1 architecture
 
-Firefox Agent is a WebExtension (Manifest V3, Firefox-flavored) with three independent bundles: **background script**, **content script** and **sidebar React app**.
+BrowserAgent is a Firefox Manifest V3 extension with three bundles: a background execution core, a page content script, and a React sidebar. The background is the only process that contacts the configured provider.
 
-## Process model
+## Request path
 
-```
-┌─────────────────────────────── Firefox ───────────────────────────────┐
-│                                                                        │
-│  Sidebar UI (React + Zustand)          Background script (MV3)         │
-│  ┌──────────────────────────┐          ┌───────────────────────────┐   │
-│  │ Chat / Context / History │◄────────►│ BackgroundOrchestrator    │   │
-│  │ Settings / Dev           │  typed   │   ├─ AgentRuntime (loop)  │   │
-│  │                          │  runtime │   ├─ ToolRegistry         │   │
-│  │ (web page of the         │  messages│   ├─ WorkspaceManager     │   │
-│  │  extension origin)       │          │   ├─ TaskManager          │   │
-│  └──────────────────────────┘          │   ├─ ConfirmationManager  │   │
-│                                        │   ├─ LLMProvider          │   │
-│                                        │   └─ FirefoxGateway       │   │
-│                                        │              │            │   │
-│                                        │              ▼            │   │
-│                                        │        TabCoordinator     │   │
-│                                        └──────────────┬────────────┘   │
-│                                                       │ tabs.sendMessage│
-│  Content script (in every inspected web page)         ▼                 │
-│  ┌─────────────────────────────────────────────────────────────┐        │
-│  │ ElementRegistry · SnapshotBuilder · interactions ·          │        │
-│  │ extractors · DomObserver (SPA detection)                    │        │
-│  └─────────────────────────────────────────────────────────────┘        │
-└──────────────────────────────────────────────────────────────────────────┘
+```text
+Sidebar command
+  → Zod-validated UiCommand
+  → single-run orchestrator
+  → durable RunRecord transition
+  → ContextCompiler / PromptPlan
+  → ResponsesAdapter or ChatCompletionsAdapter
+  → validated tool call
+  → external confirmation policy
+  → persist redacted intent
+  → FirefoxGateway / content script
+  → target-specific verification
+  → persist result and usage
+  → next compiled request or final message
 ```
 
-**Content scripts never call the LLM.** All API communication happens in the background, in the extension's trusted origin.
+Every event, message, prompt usage record, and run plan carries a run ID where applicable and a monotonic sequence. Only one run may be active globally. Settings and workspace mutations are rejected while it is active.
 
-## Layering
+## Durable execution
 
-The strict dependency direction is:
+`src/persistence/repository.ts` owns one typed IndexedDB database. A fresh installation creates the first workspace and conversation in one transaction. The incompatible `firefox-agent` v0.1 database is deleted; there is no legacy data migration.
 
-```
-shared  ←  security  ←  tools  ←  agent  ←  background
-   ↑         ↑           ↑        ↑          ↑
-   └─────────┴───────────┴────────┴──────────┘   (nothing depends downward)
-```
+Runs transition through `planning`, `awaiting_confirmation`, `executing`, `responding`, and `completed`, with terminal `failed`, `cancelled`, and `interrupted` states. The orchestrator persists action intent before calling Firefox and persists success, failure, denial, or `unverified` afterward. On initialization all unfinished runs become `interrupted`; mutating actions are never replayed.
 
-### `src/shared` — contracts
-- `types.ts` — LLM messages, provider config, settings, workspace, task, confirmation, dev events
-- `protocol.ts` — typed sidebar↔background request/response unions (no loosely typed messaging)
-- `contentProtocol.ts` — typed background↔content protocol; frame-scoped element ids (`E3`, `5:E3`)
-- `browserGateway.ts` — the **only** interface through which the agent touches the browser
-- `errors.ts` — structured error codes with `suggestedAction` recovery hints
-- `semanticMatch.ts` — pure element identity hashing + semantic matching (stale-element recovery)
-- `redact.ts`, `tokens.ts`, `id.ts` — secret redaction, token estimation, ids/time
+An `AbortController` covers the provider stream, pending confirmation, and every awaited browser operation; wrappers stop awaiting APIs that ignore `AbortSignal`, and in-flight content-script work receives a `cancel_operation` message. Stop is run-scoped, safe before and after start, and an already-dispatched mutation is recorded `unverified` rather than silently completed or retried. Late provider results cannot resurrect a cancelled run. Operational ceilings are 12 provider turns, 25 browser actions, five minutes per run, and 15 seconds per local wait.
 
-### `src/security` — enforcement outside the model
-- `confirmation.ts` — pure, mode-aware rules: Interactive requires approval for meaningful actions, Agent requires approval for high-risk actions, and YOLO bypasses confirmations
-- `injection.ts` — untrusted-data wrapping (`<untrusted_page_content>`), instruction-phrase neutralization, injection detection
-- `privacy.ts` — privacy gates: what page data may leave the extension, sensitive-field masking
+## Context compilation
 
-### `src/tools` — the tool layer
-`ToolRegistry` is the single source of truth for:
-- available tools (names/descriptions)
-- LLM-facing JSON schemas (generated from zod via `zod-to-json-schema`)
-- validation (`validateCall` — model output is never trusted)
-- execution (`executeCall` with a typed `ToolContext`)
+Providers receive only `PromptCompilation`; they do not construct conversation context. `ContextCompiler` orders the stable instructions and tool schemas before all dynamic material, then plans:
 
-The registry keeps a stable model-visible tool catalog on every request so the system-and-tools prompt prefix remains cacheable. Trusted runtime scope guards still reject cross-tab operations unless the user explicitly requested that scope. The local `wait` tool sleeps inside the extension for bounded website timers and returns before the next model turn; no provider request is made during the delay. `download_file` delegates HTTP(S) transfers of any MIME type to Firefox's download manager, so large files never enter agent memory. Overlapping legacy aliases remain executable but are hidden from the model.
+1. stable instructions and schemas;
+2. active run state and active-tab metadata;
+3. compacted checkpoint, if any;
+4. locally ranked workspace notes;
+5. up to six recent user/assistant pairs;
+6. the current request;
+7. current-run tool results and explicit page reads.
 
-### `src/agent` — the runtime
-- `AgentRuntime.run(userText)` implements the loop:
+Initial context has the user request and active-tab metadata only. Page text enters context solely through `read_page`; metadata for other tabs enters through `list_tabs`.
 
-```
-send user request → build context → LLM →
-  if final text → return
-  if tool calls → validate each → confirmation policy →
-                 execute sequentially → observation → repeat
-until: final response | awaiting user | max iterations | timeout | error | stopped
-```
+Each `ContextSegment` has a stable content hash, token estimate, priority, and required flag. Required material must fit the hard limit. Optional page excerpts, chatter, notes, and history are admitted only within the soft limit. Chat history can be converted into a strict provider-generated compacted checkpoint; Responses endpoints can use native compaction when their connection test proved the request option is accepted. There is no automatic provider truncation.
 
-- `ContextBuilder` — stable system/tool instructions plus conversation, active-tab, workspace, task, and tool-observation context, all wrapped per the injection rules
-- `TokenBudget` — estimates the prompt and triggers conversation compression when the configured context threshold is reached
-- `ContextCompressor` — creates discrete compacted conversation checkpoints; dynamic runtime context is appended so later requests extend the previous cacheable prefix exactly
-- `TaskManager` — explicit `AgentTask` state machine, persisted to IndexedDB
-- `ConfirmationManager` — pending approval requests; the loop **blocks** until the user decides; denial is fed back to the model as `CONFIRMATION_DENIED`; the LLM has no path to approve its own actions
-- Page-readiness timeouts stay inside the runtime: it performs one bounded local wait/retry and emits a deterministic chat result if the page is still blocked, avoiding repeated provider turns for unchanged loading state
+The sidebar retains complete local chat independently of provider context. Completed page-backed runs also create deterministic, editable capsules containing request/outcome text and source references; raw page bodies, tool payloads, and form values are excluded.
 
-### `src/providers` — the LLM layer
-`LLMProvider` interface (`send`, `supportsToolCalling`, `supportsStreaming`, `capabilities`, optional `listModels`). The OpenAI-compatible implementation supports:
-- `POST {baseUrl}/chat/completions` and `POST {baseUrl}/responses`
-- SSE streaming with delta accumulation
-- tool-call argument parsing with malformed-JSON recovery (markdown fences, embedded objects)
-- retry with backoff for 429/5xx/network errors, per-attempt timeouts
-- capability auto-detection (local servers → no tools) with user overrides
-- structured-output fallback for models without function calling (`{"tool_calls": [...]}`)
-- provider-aware prompt caching: stable per-conversation cache keys, OpenAI cache breakpoints/options on supported GPT models, and DeepSeek's automatic cache behavior
-- normalized input, output, cache-hit, cache-miss, and cache-write usage from both streaming and non-streaming responses
+Visible text emitted by intermediate provider/tool turns is stored separately from conversation context and rendered as a collapsible chat trace. Consecutive turns render as one thinking block; a new block starts only after a turn that dispatched a browser mutation, tracked via the persisted `actionsStarted` field. Encrypted or otherwise opaque provider reasoning items remain opaque. Starting a new chat atomically removes the current workspace's messages, notes, runs, usage, actions, prompt plans, and visible turn traces, then creates a fresh conversation while preserving settings.
 
-### `src/workspace` — cross-tab context
-`WorkspaceManager` keeps per-tab `{summary, importantFacts, extractedEntities, lastInspectedAt, pageChangedSinceInspection}`. Facts are stale-marked when a tab's URL changes; closed tabs keep their facts in long-term memory. `renderForModel()` produces the compact workspace block the LLM sees — never raw page contents.
+## Provider profiles
 
-### `src/memory` / `src/settings`
-- `IndexedDbMemoryStore` — conversations, messages, workspace, facts, tasks, provider config, and cumulative token/cache usage
-- `WebExtensionSettingsRepository` — settings in `storage.local`, provider config (with API key) in IndexedDB
+Local settings contain named provider/key profiles and an active ID. `provider` is a derived compatibility projection. Schema migration preserves the legacy single-provider key/model; duplicate IDs and dangling selections are rejected. Editing a model updates only its active profile. Switching is idle-only and explicit, with no key rotation or cross-provider fallback. Credentials are stored locally without encryption and never included in model context. API requests reject redirects and omit ambient cookies.
 
-### `src/background` — wiring
-- `FirefoxGateway` — real implementation of `BrowserGateway`: tab ops, navigation with document-plus-network-idle waiting, per-tab fetch/XHR/beacon accounting with a bounded fallback for polling/streaming sites, content-script registration after optional permission grant, snapshot caching + invalidation, stale-element recovery (refresh snapshot → semantic match → retry once), compact observation formatting
-- `TabCoordinator` — tab lifecycle events → workspace sync (URL changes, closes, activations), closed-tab records for undo
-- `Orchestrator` — owns runtime/workspace/tasks/confirmations, message persistence, token/cache aggregation, dev-event buffer (redacted)
-- `index.ts` — router for the typed sidebar protocol + content-script notifications
+## Stable provider prefix
 
-### `src/sidebar` — React UI
-Zustand store mirroring background state through pushed events (`MESSAGE_ADDED`, `STREAM_DELTA`, `ACTIVITY`, `CONFIRMATION_REQUESTED`, `WORKSPACE_CHANGED`, `TOKEN_USAGE_UPDATED`, `AGENT_STATE`, `DEV_EVENT`). Views: Chat (with activity feed, confirmation banner, and compact cache/token/context telemetry above the composer), Context (workspace tabs, pin/add/remove), History (action log + data controls), Settings (provider with **Test connection** → `/models`, mode, limits, privacy, memory, dev mode), Dev (context sizes, tool calls, LLM requests — redacted).
+`CORE_INSTRUCTIONS` and the 15 definitions in `src/tools/definitions.ts` are deterministic and versioned. Their exact hashes and reviewed token counts live in `src/test/fixtures/stable-budget.json`. Tests fail on byte changes and on unreviewed growth above 10%.
 
-## Message protocol
+For Responses requests, the developer block is first, followed by dynamic messages and stateless output-item chaining with `store: false`. Function outputs retain their `call_id`; unknown reasoning and compaction items are preserved opaquely. When accepted, a single explicit cache breakpoint follows the stable developer block, and the cache key is derived from prompt version, tool-schema version, protocol, and model. Page data always follows that breakpoint.
 
-All internal messages are discriminated unions:
+Tool wire schemas use `strict: false` because optional/defaulted arguments are validated locally. Both adapters use the policy's actual output reserve. Repeated successful reads of the same page slice are replaced with a superseded marker in the transient trace; other queries, pages, and pagination slices remain intact. Multiline history is encoded as JSONL so embedded role-like text cannot split messages.
 
-```ts
-// sidebar → background
-{ type: "SEND_USER_MESSAGE"; text: string }
-{ type: "WORKSPACE_ADD_TAB"; tabId: number; pinned?: boolean }
-{ type: "CONFIRMATION_RESPONSE"; requestId: string; approved: boolean }
-{ type: "FETCH_MODELS" }
-…
+Chat Completions requests use the same stable-first ordering, streamed usage, and sequential tool calls. Compaction uses the configured endpoint itself and a bounded structured context.
 
-// background → content (routed per frame)
-{ kind: "get_snapshot"; opts?: SnapshotRequestOptions; frameId: number }
-{ kind: "click"; elementId: string }      // frame-scoped: "E3" | "5:E3"
-{ kind: "describe_element"; elementId: string }
-…
+Actual input, cached input, cache-write, output, and reasoning tokens are normalized when reported. Otherwise cached local estimates are used. Exact server counting is called only close to the soft limit.
 
-// content → background
-{ type: "PAGE_CHANGED"; url: string; reason: "history" | "mutation" | "navigation" }
-```
+## Page index and handles
 
-## Key flows
+The content script builds visible semantic blocks, excludes live form/editable values even from ancestor text, deduplicates passages, and splits long blocks instead of dropping them. Navigation regions are down-ranked rather than removed; dialogs remain readable. Text and controls share a query-ranked, serialized-JSON token budget. `text`/`controls` modes avoid irrelevant payloads. Cursors fingerprint the query, scope, and observed contents; every control remains reachable through pagination. Too-small budgets fail explicitly rather than returning truncated JSON. There is no snapshot cache that can hide property-only state changes.
 
-### Element interaction
-1. The runtime includes the active page's semantic map with stable ids in every task context: `[1] input "Email"` …
-2. The model directly requests `click_element(elementId: "3")`; it does not perform a redundant snapshot preflight.
-3. The registry validates the element still exists **and its identity hash matches** (DOM mutations invalidate).
-4. Pointer actions use a [Playwright-inspired actionability model](https://playwright.dev/docs/actionability): auto-wait for visible, enabled, stable and unobscured; scroll into view; then dispatch the pointer/mouse/click sequence.
-5. Text filling auto-waits for visible, enabled and editable; uses the native value setter; emits `beforeinput`, `input` and `change`; and reports whether the page retained the requested value.
-6. Mutable form state (`value`, `checked`) is not part of element identity, so the same id remains valid after filling or toggling a control.
-7. On `ELEMENT_NOT_FOUND`: snapshot is refreshed, the stale element is matched semantically (role+name+type+href scoring), and the action retries once with the new id. The agent is never silently pointed at an unrelated element.
+`list_frames` uses a fixed extension-owned discovery function to obtain readable frame IDs. `read_page` and `wait_for` route by frame ID. Open shadow roots are traversed and observed. Handles are stored in a `WeakMap`-backed registry and bound to `{tabId, frameId, revision, id}`, with document-unique IDs. Resolution always checks connectivity and semantic identity (including accessible name, role, destination, and form action), even before mutation delivery. Unrelated DOM churn does not invalidate an unchanged target; recycled targets produce `STALE_HANDLE` and are never replaced automatically.
 
-Content-script events are necessarily synthetic (`isTrusted === false`); unlike Playwright, a WebExtension has no browser-protocol input channel. The readiness checks, browser activation behavior and post-action verification provide the reliable subset available to an extension.
+Interactions scroll, check visibility/disabled/occlusion, and re-resolve after scroll and focus. Native setters and activation events run site handlers; postconditions are checked after a short settling delay. Ambiguous or disabled options fail, checkbox updates are idempotent, and submit uses only valid submitters. Clicks/submissions remain `unverified` unless navigation or target accessibility state confirms a change. Removal alone is not success. Never replay an unverified action automatically.
 
-### Cross-tab comparison
-`list_tabs` → inspect tab A (`summarize_tab`, which stores a local summary and key facts) → … → the runtime injects the compact combined workspace context → the LLM answers from facts, not raw pages. Follow-ups ("which one was cheapest?") reuse cached facts with zero tool calls.
+## Trust and privacy boundaries
 
-### Confirmation enforcement
-`executeToolCall` → schema validation → `evaluateConfirmation` (pure rules, mode-aware) → if required: task goes `awaiting_user`, a `ConfirmationRequest` is pushed to the sidebar, and the loop **awaits the user's decision**. Denial becomes a `CONFIRMATION_DENIED` observation; the model continues. YOLO mode explicitly bypasses both policy-derived and tool-declared confirmations while leaving schema validation, privacy gates, page scope, action budgets, and timeouts intact.
+Page content and tool results are untrusted data under the stable developer instruction. Only HTTP(S) URLs are accepted; privileged, file, data, JavaScript, and extension URLs are rejected before Firefox is called.
 
-## Build
+The content script exposes labels, roles, non-sensitive state, and explicit page excerpts. It never includes existing text-field values. Password, OTP, verification-code, and payment-field descriptors are marked sensitive. Action values and provider secrets are redacted before persistence.
 
-Three Vite builds (`vite.background.config.ts`, `vite.content.config.ts`, `vite.sidebar.config.ts`) run via `scripts/build.mjs`; `scripts/copy-static.mjs` copies `manifest.json` + generated icons into `dist/`. The manifest uses Firefox MV3 (`background.scripts`, `sidebar_action`).
+The manifest has only `storage`, `tabs`, and `scripting`, plus optional `<all_urls>` access requested during onboarding. There is no remote code or web-accessible extension resource.
+
+## Verification
+
+Vitest covers compiler ordering and limits, stable-prefix regression, both provider formats, SSE parsing, usage normalization, cache behavior, strict URLs, policy modes, action redaction, stale handles, atomic bootstrap, and restart interruption. A reconstructed v0.1 payload fixture enforces at least 50% lower median raw input under the reviewed v1 ceilings.
+
+The production pipeline additionally runs strict TypeScript, ESLint, Prettier, coverage thresholds, minified Vite builds without source maps, `web-ext lint`, package inspection, production dependency audit, and Selenium tests that install the exact generated Firefox ZIP for profile persistence. The production content bundle is also executed against a local Firefox DOM fixture with a stubbed message transport, testing pagination, privacy, shadow labels, stale links, disabled/covered controls, cancelled clicks, native setters, and submission semantics.

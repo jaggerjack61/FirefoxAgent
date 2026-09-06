@@ -23,7 +23,7 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, "dist/sidebar"),
     emptyOutDir: true,
-    sourcemap: true,
-    minify: false,
+    sourcemap: false,
+    minify: "esbuild",
   },
 });

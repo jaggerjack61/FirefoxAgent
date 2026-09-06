@@ -1,487 +1,889 @@
-/**
- * BackgroundOrchestrator: wires the agent together in the background and
- * serves the sidebar. Owns:
- *  - the agent runtime, workspace, tasks, confirmations, provider
- *  - message persistence (IndexedDB)
- *  - settings and provider (re)creation
- *  - dev-event buffering for the debug view
- *  - action history + activity log
- */
+import { abortable } from "@/shared/abort";
+import { pruneSupersededReads } from "@/context/observations";
+import { serializeToolResult } from "@/tools/results";
+import { ContextBudgetError, ContextCompiler, type TraceSegment } from "@/context/compiler";
+import { IndexedDbRepository, type Repository } from "@/persistence/repository";
+import {
+  createProvider,
+  listProviderModels as fetchProviderModels,
+  persistedUsage,
+  type ConversationStep,
+  type ProviderRequest,
+} from "@/providers";
+import {
+  DEFAULT_SETTINGS,
+  appSettingsSchema,
+  makeTokenPolicy,
+  providerCapabilitiesSchema,
+  providerSettingsSchema,
+  type ActionIntent,
+  type AgentEvent,
+  type AppSettings,
+  type PendingConfirmation,
+  type ProviderConnection,
+  type ProviderSettings,
+  type RunRecord,
+  type SafetyMode,
+  type SourceReference,
+  type ToolCall,
+  type UiCommand,
+} from "@/shared/schema";
+import { TOKEN_LIMITS, createId, stableStringify, truncateToTokens } from "@/shared/token";
+import { makeActionIntent, requiresConfirmation, type TargetDescriptor } from "@/security/policy";
+import { SettingsRepository } from "@/settings/repository";
+import { selectProvider, updateActiveProvider } from "@/settings/profiles";
+import { TOOL_DEFINITIONS, parseToolInput } from "@/tools/definitions";
+import { FirefoxGateway } from "./firefoxGateway";
 
-import type {
-  ActionLogEntry,
-  AgentRuntimeState,
-  AppSettings,
-  ChatMessageRecord,
-  ConfirmationRequest,
-  ConversationRecord,
-  DevEvent,
-  LLMExchangeLog,
-  LLMUsage,
-  TokenUsageMetrics,
-  ToolActivityRecord,
-  Workspace,
-} from "@/shared/types";
-import type { BootstrapPayload } from "@/shared/protocol";
-import type { BackgroundEvent } from "@/shared/events";
-import type { BrowserGateway } from "@/shared/browserGateway";
-import type { MemoryStore } from "@/memory/MemoryStore";
-import type { SettingsRepository } from "@/settings/SettingsRepository";
-import type { WorkspaceManager } from "@/workspace/WorkspaceManager";
-import { AgentRuntime } from "@/agent/AgentRuntime";
-import { TaskManager } from "@/agent/TaskManager";
-import { ConfirmationManager } from "@/agent/ConfirmationManager";
-import { createProvider } from "@/providers/registry";
-import type { LLMProvider } from "@/providers/LLMProvider";
-import { createToolRegistry, type ToolRegistry } from "@/tools/index";
-import { newId } from "@/shared/id";
-import { redact } from "@/shared/redact";
+type EventSink = (event: AgentEvent) => void;
 
-export class BackgroundOrchestrator {
-  readonly confirmations: ConfirmationManager;
-  private readonly tasks: TaskManager;
-  private readonly registry: ToolRegistry;
-  private provider: LLMProvider;
-  private settings: AppSettings;
-  private runtime!: AgentRuntime;
-  private conversation: ConversationRecord | null = null;
-  private messages: ChatMessageRecord[] = [];
-  private activity: ToolActivityRecord[] = [];
-  private actionLog: ActionLogEntry[] = [];
-  private devEvents: DevEvent[] = [];
-  /**
-   * Full request/response exchange logs for the dev panel's export feature.
-   * Scoped to the current conversation; cleared on new/clear conversation.
-   */
-  private exchangeLogs: LLMExchangeLog[] = [];
-  private tokenUsage: TokenUsageMetrics;
-  private runtimeState: AgentRuntimeState = { status: "idle", iterations: 0 };
-  private listeners = new Set<(event: BackgroundEvent) => void>();
+interface PendingResolver {
+  intent: ActionIntent;
+  resolve: (approved: boolean) => void;
+}
+
+/** Abort reason for the run deadline. Node's DOMException extends Error, so a
+ * dedicated class is the only reliable way to distinguish timeouts from Stop. */
+class RunTimeoutError extends Error {
+  constructor() {
+    super("The run reached its time limit");
+    this.name = "RunTimeoutError";
+  }
+}
+
+export class Orchestrator {
+  private readonly compiler = new ContextCompiler();
+  private readonly settingsRepository = new SettingsRepository();
+  private settings: AppSettings = DEFAULT_SETTINGS;
+  private mode: SafetyMode = "agent";
+  private eventSequence = 0;
+  private abortController: AbortController | null = null;
+  private currentRunId: string | null = null;
+  private snapshotSequence = 0;
+  private pending: PendingResolver | null = null;
+  private initialized = false;
 
   constructor(
-    private readonly store: MemoryStore,
-    private readonly settingsRepo: SettingsRepository,
-    private readonly workspace: WorkspaceManager,
-    private readonly gateway: BrowserGateway,
-    registry: ToolRegistry,
-    provider: LLMProvider,
-    settings: AppSettings,
-  ) {
-    this.tasks = new TaskManager(store);
-    this.confirmations = new ConfirmationManager({ emit: (e) => this.broadcast(e) });
-    this.provider = provider;
-    this.settings = settings;
-    this.tokenUsage = emptyTokenUsage(settings.provider.contextLimitTokens);
-    this.registry = registry;
-    this.runtime = this.buildRuntime(registry);
+    private readonly repository: Repository = new IndexedDbRepository(),
+    private readonly gateway = new FirefoxGateway(),
+    private readonly emitEvent: EventSink = () => undefined,
+  ) {}
+
+  async init(): Promise<void> {
+    if (this.initialized) return;
+    if (this.repository instanceof IndexedDbRepository) await this.repository.resetLegacy();
+    await this.repository.bootstrap();
+    await this.repository.interruptActiveRuns();
+    this.settings = await this.settingsRepository.load();
+    this.mode = this.settings.mode;
+    await this.gateway.registerContentScript().catch(() => undefined);
+    this.initialized = true;
   }
 
-  /** Creates the runtime wired to this orchestrator. */
-  private buildRuntime(registry: ToolRegistry): AgentRuntime {
-    return new AgentRuntime({
-      provider: this.provider,
-      registry,
-      workspace: this.workspace,
-      tasks: this.tasks,
-      confirmations: this.confirmations,
-      gateway: this.gateway,
+  async handle(command: UiCommand): Promise<unknown> {
+    await this.init();
+    switch (command.type) {
+      case "get_state":
+        return this.snapshot();
+      case "send_message":
+        return this.startRun(command.text);
+      case "stop_run":
+        await this.stop(command.runId);
+        return { stopped: true };
+      case "confirm_action":
+        return { accepted: this.resolveConfirmation(command.actionId, command.approved) };
+      case "set_mode":
+        await this.setMode(command.mode);
+        return { mode: this.mode };
+      case "save_settings": {
+        await this.assertIdle();
+        const next = appSettingsSchema.parse(command.settings);
+        await this.settingsRepository.save(next);
+        this.settings = next;
+        this.mode = this.settings.mode;
+        await this.pushState();
+        return { saved: true };
+      }
+      case "set_model": {
+        await this.assertIdle();
+        const provider = this.settings.provider;
+        if (!provider) throw new Error("Configure a provider in settings before choosing a model");
+        const modelChanged = command.model !== provider.model;
+        const next = updateActiveProvider(
+          this.settings,
+          providerSettingsSchema.parse({
+            ...provider,
+            model: command.model,
+            availableModels: command.availableModels ?? provider.availableModels,
+            capabilities: modelChanged ? providerCapabilitiesSchema.parse({}) : provider.capabilities,
+          }),
+        );
+        await this.settingsRepository.save(next);
+        this.settings = next;
+        await this.pushState();
+        if (modelChanged)
+          this.emit("notice", {
+            message: "Model changed. Re-test the provider in settings to refresh its capabilities.",
+          });
+        return { model: command.model };
+      }
+      case "set_provider": {
+        await this.assertIdle();
+        const next = selectProvider(this.settings, command.providerId);
+        await this.settingsRepository.save(next);
+        this.settings = next;
+        await this.pushState();
+        return { providerId: command.providerId };
+      }
+      case "test_provider":
+        await this.assertIdle();
+        return this.testProvider(command.provider);
+      case "list_provider_models":
+        await this.assertIdle();
+        return this.listProviderModels(command.provider);
+      case "request_site_access": {
+        await this.assertIdle();
+        const granted = await this.gateway.requestSiteAccess();
+        await this.pushState();
+        return { granted };
+      }
+      case "new_chat":
+        await this.assertIdle();
+        await this.repository.resetCurrentWorkspace();
+        this.emit("stream_reset", {});
+        await this.pushState();
+        return { cleared: true };
+      case "new_workspace":
+        await this.assertIdle();
+        await this.repository.createWorkspace(command.name ?? "New workspace");
+        await this.pushState();
+        return { created: true };
+      case "update_note": {
+        await this.assertIdle();
+        const workspace = await this.repository.getWorkspace();
+        const note = (await this.repository.listNotes(workspace.id)).find(
+          (entry) => entry.id === command.noteId,
+        );
+        if (!note) throw new Error("Workspace note not found");
+        await this.repository.putNote({
+          ...note,
+          title: command.title,
+          content: command.content,
+          generated: false,
+          updatedAt: Date.now(),
+        });
+        await this.pushState();
+        return { saved: true };
+      }
+      case "delete_note":
+        await this.assertIdle();
+        await this.repository.deleteNote(command.noteId);
+        await this.pushState();
+        return { deleted: true };
+    }
+  }
+
+  private async snapshot() {
+    const workspace = await this.repository.getWorkspace();
+    const [messages, modelTurns, notes, activeRun, usage, hasSiteAccess] = await Promise.all([
+      this.repository.listMessages(workspace.conversationId),
+      this.repository.listModelTurns(workspace.conversationId),
+      this.repository.listNotes(workspace.id),
+      this.repository.getActiveRun(),
+      this.repository.listUsage(),
+      this.gateway.hasSiteAccess(),
+    ]);
+    return {
       settings: this.settings,
-      emit: (e) => this.broadcast(e),
-      emitDev: (e) => this.pushDevEvent(e as DevEvent),
-      persistMessage: async (msg) => {
-        await this.appendMessage(msg.role, msg.content, msg.toolCallId, msg.name);
-      },
-      getActionHistory: () => this.actionLog.slice(),
-      getPromptCacheKey: () => `browser-agent-v1:${this.conversation?.id ?? this.workspace.getWorkspace()?.conversationId ?? "session"}`,
-      reportUsage: (usage, estimatedInput, estimatedOutput, contextLimit) =>
-        this.recordUsage(usage, estimatedInput, estimatedOutput, contextLimit),
-      recordExchange: (log) => this.recordExchange(log),
+      mode: this.mode,
+      workspace,
+      messages,
+      modelTurns,
+      notes,
+      activeRun,
+      pendingConfirmation: this.pending
+        ? ({ intent: this.pending.intent, requestedAt: Date.now() } satisfies PendingConfirmation)
+        : null,
+      usage: usage.slice(-100),
+      hasSiteAccess,
+    };
+  }
+
+  private async startRun(text: string): Promise<{ runId: string }> {
+    await this.assertIdle();
+    if (!this.settings.provider) throw new Error("Configure and test a provider before starting a run");
+    // Reserve cancellation before any startup persistence awaits. Two concurrent sends
+    // must not replace the controller that Stop is about to abort.
+    if (this.abortController) throw new Error("Another run is active");
+    const controller = new AbortController();
+    this.abortController = controller;
+    const providerSettings = this.settings.provider;
+    try {
+      const workspace = await this.repository.getWorkspace();
+      const now = Date.now();
+      const userMessageId = createId("message");
+      const run: RunRecord = {
+        id: createId("run"),
+        workspaceId: workspace.id,
+        conversationId: workspace.conversationId,
+        userMessageId,
+        status: "planning",
+        mode: this.mode,
+        sequence: 0,
+        turnCount: 0,
+        actionCount: 0,
+        estimatedTokens: 0,
+        actualTokens: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.currentRunId = run.id;
+      await this.repository.putMessage({
+        id: userMessageId,
+        conversationId: workspace.conversationId,
+        runId: run.id,
+        sequence: 0,
+        role: "user",
+        content: text,
+        createdAt: now,
+      });
+      await this.repository.putRun(run);
+      await this.pushState(run.id);
+      void this.continueRun(run, text, providerSettings, controller).catch(() => undefined);
+      return { runId: run.id };
+    } catch (error) {
+      if (this.abortController === controller) {
+        this.abortController = null;
+        this.currentRunId = null;
+      }
+      throw error;
+    }
+  }
+
+  private async continueRun(
+    initialRun: RunRecord,
+    userRequest: string,
+    providerSettings: ProviderSettings,
+    controller: AbortController,
+  ): Promise<void> {
+    let run = initialRun;
+    let steps: ConversationStep[] = [];
+    let compactedContext: string | undefined;
+    const sources: SourceReference[] = [];
+    let finalText = "";
+    const provider = createProvider(providerSettings);
+    const policy = makeTokenPolicy(providerSettings.contextWindow, providerSettings.maxOutputTokens);
+    const deadline = setTimeout(() => controller.abort(new RunTimeoutError()), TOKEN_LIMITS.maxRunMs);
+
+    try {
+      for (let turn = 0; turn < providerSettings.maxThinkingTurns; turn += 1) {
+        this.throwIfStopped(controller.signal, run.createdAt);
+        const workspace = await this.repository.getWorkspace();
+        const [messages, notes, activeTab] = await Promise.all([
+          this.repository.listMessages(workspace.conversationId),
+          this.repository.listNotes(workspace.id),
+          abortable(controller.signal, () => this.gateway.activeTab()),
+        ]);
+        pruneSupersededReads(steps);
+        const trace = traceFromSteps(steps);
+        const compilation = this.compiler.compile({
+          runId: run.id,
+          sequence: turn,
+          policy,
+          userRequest,
+          activeTab,
+          mode: run.mode,
+          messages: messages.filter((message) => message.id !== run.userMessageId),
+          notes,
+          trace,
+          compactedContext,
+        });
+        await this.repository.putPromptPlan(compilation.plan);
+
+        if (
+          providerSettings.protocol === "chat_completions" &&
+          compilation.plan.compactionRequired &&
+          !compactedContext &&
+          provider.compact
+        ) {
+          const compacted = await abortable(controller.signal, () =>
+            provider.compact!({
+              settings: providerSettings,
+              messages: messages.slice(-TOKEN_LIMITS.recentPairs * 2).map((message) => ({
+                role: message.role,
+                content: message.content,
+              })),
+              policy,
+              signal: controller.signal,
+            }),
+          );
+          const compactUsage = persistedUsage(
+            createId("usage"),
+            run.id,
+            turn,
+            compilation.plan.estimatedInput,
+            compacted.usage,
+            compilation.plan.segments.map((segment) => ({
+              kind: segment.kind,
+              tokens: segment.estimatedTokens,
+            })),
+            "compaction",
+          );
+          await this.repository.putUsage(compactUsage);
+          compactedContext = truncateToTokens(compacted.content, TOKEN_LIMITS.compactedSummary);
+          // This compaction summarizes prior conversation only; retain current tool calls/results.
+          run = await this.updateRun(run, {
+            estimatedTokens: run.estimatedTokens + compilation.plan.estimatedInput,
+            actualTokens: run.actualTokens + compactUsage.total,
+          });
+          continue;
+        }
+
+        const estimatedTotal = run.estimatedTokens + compilation.plan.estimatedInput;
+        if (estimatedTotal > policy.runLimit) throw new Error("The run reached its configured token limit");
+        run = await this.updateRun(run, {
+          status: "responding",
+          turnCount: turn + 1,
+          estimatedTokens: estimatedTotal,
+        });
+
+        const request: ProviderRequest = {
+          settings: providerSettings,
+          compilation,
+          baseMessages: compilation.messages,
+          steps,
+          tools: TOOL_DEFINITIONS,
+          policy,
+          requestSequence: turn,
+          signal: controller.signal,
+        };
+
+        if (
+          provider.countInput &&
+          providerSettings.capabilities.exactCounting &&
+          compilation.plan.estimatedInput >= policy.inputSoftLimit * 0.8
+        ) {
+          const exact = await abortable(controller.signal, () => provider.countInput!(request));
+          if (exact > policy.inputHardLimit) {
+            const compacted = await abortable(controller.signal, async () =>
+              provider.compact?.({
+                settings: providerSettings,
+                messages: compilation.messages,
+                steps,
+                policy,
+                signal: controller.signal,
+              }),
+            );
+            if (!compacted)
+              throw new ContextBudgetError(
+                "Provider input exceeds the hard limit",
+                exact,
+                policy.inputHardLimit,
+              );
+            const compactUsage = persistedUsage(
+              createId("usage"),
+              run.id,
+              turn,
+              compilation.plan.estimatedInput,
+              compacted.usage,
+              compilation.plan.segments.map((segment) => ({
+                kind: segment.kind,
+                tokens: segment.estimatedTokens,
+              })),
+              "compaction",
+            );
+            await this.repository.putUsage(compactUsage);
+            run = await this.updateRun(run, { actualTokens: run.actualTokens + compactUsage.total });
+            if (compacted.opaqueItems) {
+              compactedContext = undefined;
+              steps = [
+                { text: "", toolCalls: [], toolResults: [], rawResponseOutput: compacted.opaqueItems },
+              ];
+            } else {
+              compactedContext = truncateToTokens(compacted.content, TOKEN_LIMITS.compactedSummary);
+              steps = [];
+            }
+            continue;
+          }
+        }
+
+        let streamedText = "";
+        this.emit("stream_reset", { turn }, run.id);
+        let result;
+        try {
+          result = await abortable(controller.signal, () =>
+            provider.stream(request, (event) => {
+              if (controller.signal.aborted || this.abortController !== controller) return;
+              if (event.type === "text_delta") {
+                streamedText += event.text;
+                this.emit("stream_delta", { text: event.text, turn }, run.id);
+              }
+            }),
+          );
+        } catch (error) {
+          if (streamedText.trim()) {
+            await this.persistModelTurn(run, turn, streamedText, [], "failed");
+          }
+          throw error;
+        }
+        this.throwIfStopped(controller.signal, run.createdAt);
+        finalText = result.text || streamedText;
+        if (result.toolCalls.length > 0) {
+          await this.persistModelTurn(run, turn, finalText, result.toolCalls, "completed");
+        }
+        const usage = persistedUsage(
+          createId("usage"),
+          run.id,
+          turn,
+          compilation.plan.estimatedInput,
+          result.usage,
+          compilation.plan.segments.map((segment) => ({
+            kind: segment.kind,
+            tokens: segment.estimatedTokens,
+          })),
+        );
+        await this.repository.putUsage(usage);
+        run = await this.updateRun(run, { actualTokens: run.actualTokens + usage.total });
+        if (run.actualTokens > policy.runLimit) throw new Error("The run reached its configured token limit");
+        if (result.incomplete) {
+          if (finalText.trim()) await this.persistModelTurn(run, turn, finalText, [], "failed");
+          throw new Error("The provider stopped because its output limit was reached");
+        }
+
+        const step: ConversationStep = {
+          text: finalText,
+          toolCalls: result.toolCalls,
+          toolResults: [],
+          rawResponseOutput: result.rawResponseOutput,
+        };
+        steps.push(step);
+
+        if (result.toolCalls.length === 0) {
+          const assistantText = finalText.trim() || "Completed without a textual response.";
+          await this.repository.putMessage({
+            id: createId("message"),
+            conversationId: run.conversationId,
+            runId: run.id,
+            sequence: run.sequence + 1,
+            role: "assistant",
+            content: assistantText,
+            createdAt: Date.now(),
+          });
+          await this.createRunNote(run, userRequest, assistantText, sources);
+          run = await this.updateRun(run, { status: "completed" });
+          this.emit("notice", { message: "Run completed" }, run.id);
+          return;
+        }
+
+        const actionsStarted: ToolCall["name"][] = [];
+        for (const call of result.toolCalls) {
+          this.throwIfStopped(controller.signal, run.createdAt);
+          if (run.actionCount >= TOKEN_LIMITS.maxActions)
+            throw new Error("The run reached its browser-action limit");
+          run = await this.updateRun(run, { status: "executing" });
+          let execution: { output: string; source?: SourceReference };
+          try {
+            execution = await this.executeTool(run, call, controller.signal, () => {
+              actionsStarted.push(call.name);
+            });
+          } catch (toolError) {
+            // A failed tool (e.g. STALE_HANDLE after page churn) is data for
+            // the model, not a fatal run error: report it as the tool result
+            // so the next turn can re-snapshot and retry instead of dying.
+            if (controller.signal.aborted) throw toolError;
+            execution = { output: stableStringify({ status: "failed", error: errorMessage(toolError) }) };
+          } finally {
+            if (actionsStarted.length)
+              await this.persistModelTurn(
+                run,
+                turn,
+                finalText,
+                result.toolCalls,
+                "completed",
+                actionsStarted,
+              );
+          }
+          this.throwIfStopped(controller.signal, run.createdAt);
+          step.toolResults.push({ callId: call.id, output: execution.output });
+          if (execution.source && !sources.some((source) => source.url === execution.source?.url))
+            sources.push(execution.source);
+          run = await this.updateRun(run, { actionCount: run.actionCount + 1, status: "planning" });
+        }
+      }
+      throw new Error("The run reached its model-turn limit");
+    } catch (error) {
+      // stop() aborts with the default DOMException reason; the run deadline
+      // aborts with a RunTimeoutError, which must remain a failure, not a cancellation.
+      const timedOut = controller.signal.aborted && controller.signal.reason instanceof RunTimeoutError;
+      const cancelled = controller.signal.aborted && !timedOut;
+      run = await this.updateRun(run, {
+        status: cancelled ? "cancelled" : "failed",
+        error: cancelled ? "Stopped by user" : errorMessage(error),
+      });
+      this.emit(cancelled ? "notice" : "error", { message: run.error }, run.id);
+    } finally {
+      clearTimeout(deadline);
+      if (this.pending?.intent.runId === run.id) {
+        this.pending.resolve(false);
+        this.pending = null;
+      }
+      if (this.abortController === controller) {
+        this.abortController = null;
+        this.currentRunId = null;
+      }
+      // Publish terminal state only after releasing the run lock.
+      await this.pushState(run.id);
+    }
+  }
+
+  private async executeTool(
+    run: RunRecord,
+    call: ToolCall,
+    signal: AbortSignal,
+    onMutationStarted: () => void,
+  ): Promise<{ output: string; source?: SourceReference }> {
+    this.throwIfStopped(signal, run.createdAt);
+    const input = parseToolInput(call.name, call.arguments);
+    let target: TargetDescriptor | undefined;
+    if (["click", "fill", "select", "set_checked", "submit"].includes(call.name)) {
+      try {
+        target = await abortable(signal, () => this.gateway.describe(input.handle, signal));
+      } catch (describeError) {
+        if (!signal.aborted) throw describeError;
+        // Keep an audit record of the interrupted intent; no effect was dispatched.
+        const interrupted = makeActionIntent(run.id, call.name, input, undefined);
+        await this.repository.putAction({
+          ...interrupted,
+          status: "failed",
+          detail: "Stopped before browser action completed",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        throw describeError;
+      }
+    }
+    const intent = makeActionIntent(run.id, call.name, input, target);
+    const now = Date.now();
+    await this.repository.putAction({
+      ...intent,
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    if (requiresConfirmation(run.mode, intent.classification)) {
+      await this.updateRun(run, { status: "awaiting_confirmation" });
+      const approved = await this.requestConfirmation(intent, signal);
+      await this.repository.putAction({
+        ...intent,
+        status: approved ? "approved" : "denied",
+        createdAt: now,
+        updatedAt: Date.now(),
+      });
+      if (!approved) return { output: stableStringify({ status: "denied_by_user" }) };
+    }
+
+    await this.repository.putAction({ ...intent, status: "started", createdAt: now, updatedAt: Date.now() });
+    let result;
+    let dispatched = false;
+    try {
+      this.throwIfStopped(signal, run.createdAt);
+      result = await abortable(signal, () => {
+        dispatched = true;
+        if (intent.classification !== "read") onMutationStarted();
+        return this.gateway.execute(call.name, input, signal);
+      });
+    } catch (error) {
+      await this.repository.putAction({
+        ...intent,
+        // A cancelled read is just failed; a cancelled mutation may already
+        // have taken effect in the page, so its outcome is genuinely unknown.
+        status: signal.aborted && dispatched && intent.classification !== "read" ? "unverified" : "failed",
+        // Do not persist arbitrary page errors: they may contain form values.
+        detail: signal.aborted
+          ? "Stopped; any already-dispatched effect cannot be undone or verified"
+          : "Browser action failed",
+        createdAt: now,
+        updatedAt: Date.now(),
+      });
+      throw error;
+    }
+    const toolStatus =
+      result.output.status === "failed" || result.output.matched === false
+        ? "failed"
+        : result.output.status === "unverified"
+          ? "unverified"
+          : "succeeded";
+    await this.repository.putAction({
+      ...intent,
+      status: toolStatus,
+      detail: typeof result.output.reason === "string" ? result.output.reason : undefined,
+      createdAt: now,
+      updatedAt: Date.now(),
+    });
+    const maximum =
+      call.name === "read_page"
+        ? Math.min(Number(input.maxTokens ?? TOKEN_LIMITS.defaultPageResult), TOKEN_LIMITS.maximumPageResult)
+        : ["list_tabs", "list_frames"].includes(call.name)
+          ? 600
+          : TOKEN_LIMITS.toolResult;
+    return {
+      // read_page already budgets the complete structured snapshot, including handles/cursors.
+      output:
+        call.name === "read_page"
+          ? stableStringify(result.output)
+          : serializeToolResult(result.output, maximum),
+      source: result.source,
+    };
+  }
+
+  private requestConfirmation(intent: ActionIntent, signal: AbortSignal): Promise<boolean> {
+    if (this.pending) throw new Error("A confirmation is already pending");
+    if (signal.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const abort = () => {
+        if (this.pending?.intent.id === intent.id) this.pending = null;
+        resolve(false);
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      this.pending = {
+        intent,
+        resolve: (approved) => {
+          signal.removeEventListener("abort", abort);
+          this.pending = null;
+          resolve(approved);
+        },
+      };
+      this.emit("state", { pendingConfirmation: { intent, requestedAt: Date.now() } }, intent.runId);
+      void this.pushState(intent.runId);
     });
   }
 
-  subscribe(listener: (event: BackgroundEvent) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+  private resolveConfirmation(actionId: string, approved: boolean): boolean {
+    if (!this.pending || this.pending.intent.id !== actionId) return false;
+    this.pending.resolve(approved);
+    return true;
   }
 
-  /** Broadcasts to all sidebar listeners (public: used by the coordinator). */
-  broadcast(event: BackgroundEvent): void {
-    let actionEntry: ActionLogEntry | undefined;
-    if (event.type === "AGENT_STATE") this.runtimeState = event.state;
-    if (event.type === "ACTIVITY" || event.type === "ACTIVITY_UPDATED") {
-      const idx = this.activity.findIndex((a) => a.id === event.activity.id);
-      if (idx === -1) this.activity.push(event.activity);
-      else this.activity[idx] = event.activity;
-      if (this.activity.length > 100) this.activity.shift();
-      if (event.activity.kind !== "thinking" && event.activity.status !== "running") {
-        actionEntry = {
-          id: event.activity.id,
-          at: event.activity.finishedAt ?? event.activity.startedAt,
-          tool: event.activity.tool,
-          label: event.activity.label,
-          status: event.activity.status,
-          detail: event.activity.detail,
-          tabId: event.activity.tabId,
-        };
-        const logIndex = this.actionLog.findIndex((entry) => entry.id === actionEntry!.id);
-        if (logIndex === -1) this.actionLog.push(actionEntry);
-        else this.actionLog[logIndex] = actionEntry;
-        if (this.actionLog.length > 200) this.actionLog.shift();
-      }
+  private async stop(runId?: string): Promise<void> {
+    if (runId && this.currentRunId !== runId) return;
+    this.abortController?.abort();
+    this.pending?.resolve(false);
+    this.pending = null;
+  }
+
+  private async setMode(mode: SafetyMode): Promise<void> {
+    await this.assertIdle();
+    this.mode = mode;
+    if (mode !== "yolo") {
+      this.settings = { ...this.settings, mode };
+      await this.settingsRepository.save(this.settings);
     }
-    for (const l of this.listeners) l(event);
-    if (actionEntry) {
-      for (const l of this.listeners) l({ type: "ACTION_LOG", entry: actionEntry });
-    }
+    await this.pushState();
   }
 
-  private pushDevEvent(event: DevEvent): void {
-    this.devEvents.push(event);
-    if (this.devEvents.length > 500) this.devEvents.shift();
-    if (this.settings.devMode) this.broadcast({ type: "DEV_EVENT", event });
-  }
-
-  /**
-   * Records a full LLM exchange (request messages incl. page snapshots + the
-   * provider response) for the dev panel's export feature. Logs are scoped to
-   * the current conversation and cleared when a new chat is started. Only
-   * forwarded to the sidebar when dev mode is enabled, but always buffered so
-   * a user who toggles dev mode on mid-conversation can still export.
-   */
-  private recordExchange(log: LLMExchangeLog): void {
-    this.exchangeLogs.push(log);
-    if (this.exchangeLogs.length > 200) this.exchangeLogs.shift();
-    if (this.settings.devMode) this.broadcast({ type: "EXCHANGE_LOG", log });
-  }
-
-  // -------------------------------------------------------------------------
-  // Bootstrap / lifecycle
-  // -------------------------------------------------------------------------
-
-  async init(): Promise<void> {
-    await this.workspace.load();
-    const convId = this.workspace.getWorkspace()?.conversationId;
-    if (convId) {
-      this.conversation = await this.store.loadConversation(convId);
-      this.messages = await this.store.loadMessages(convId);
-      this.tokenUsage = normalizeTokenUsage(this.conversation?.tokenUsage, this.settings.provider.contextLimitTokens);
-      this.runtime.setConversation(this.toLLMMessages(this.messages));
-    }
-  }
-
-  async ensureConversation(): Promise<ConversationRecord> {
-    if (this.conversation) return this.conversation;
-    const ws = this.workspace.getWorkspace();
-    const conv: ConversationRecord = {
-      id: ws?.conversationId ?? newId("conv"),
-      title: "New conversation",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      messageIds: [],
-      tokenUsage: { ...this.tokenUsage },
+  private async testProvider(value: ProviderSettings) {
+    const provider = providerSettingsSchema.parse(value);
+    const adapter = createProvider(provider);
+    const policy = makeTokenPolicy(provider.contextWindow, provider.maxOutputTokens);
+    const compilation = this.compiler.compile({
+      runId: "provider_test",
+      sequence: 0,
+      policy,
+      userRequest: "Reply with OK only.",
+      mode: "agent",
+      messages: [],
+      notes: [],
+      trace: [],
+    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const baseRequest: ProviderRequest = {
+      settings: { ...provider, capabilities: providerCapabilitiesSchema.parse({}) },
+      compilation,
+      baseMessages: compilation.messages,
+      steps: [],
+      tools: [],
+      policy,
+      requestSequence: 0,
+      signal: controller.signal,
     };
-    this.conversation = conv;
-    await this.store.saveConversation(conv);
-    return conv;
-  }
-
-  async bootstrap(): Promise<BootstrapPayload> {
-    const conv = await this.ensureConversation();
-    const pending = this.confirmations.pendingRequest;
-    const active = await this.gateway.getActiveTab();
-    return {
-      settings: this.settings,
-      runtimeState: this.runtimeState,
-      conversation: conv,
-      messages: this.messages,
-      workspace: this.workspace.getWorkspace(),
-      actionLog: this.actionLog.slice(-100),
-      activity: this.activity.slice(-50),
-      pendingConfirmation: pending,
-      hasSiteAccess: await this.gateway.hasHostAccess(active?.url ?? "https://example.com"),
-      activeTabId: active?.id,
-      tokenUsage: { ...this.tokenUsage },
-    };
-  }
-
-  async updateSettings(settings: AppSettings): Promise<void> {
-    const activeConversation = this.runtime.getConversation();
-    this.settings = settings;
-    this.tokenUsage = { ...this.tokenUsage, contextLimitTokens: settings.provider.contextLimitTokens };
-    await this.settingsRepo.save(settings);
-    this.provider = createProvider(settings.provider);
-    this.runtime = this.buildRuntime(this.registry);
-    this.runtime.setConversation(activeConversation);
-    this.broadcast({ type: "AGENT_STATE", state: this.runtimeState });
-    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
-  }
-
-  getSettings(): AppSettings {
-    return this.settings;
-  }
-
-  /** Lists models from the configured provider's /models endpoint. */
-  async listModels(): Promise<string[]> {
-    if (!this.provider.listModels) return [];
-    return this.provider.listModels();
-  }
-
-  // -------------------------------------------------------------------------
-  // Workspace operations (sidebar-driven)
-  // -------------------------------------------------------------------------
-
-  getWorkspace() {
-    return this.workspace.getWorkspace();
-  }
-
-  broadcastWorkspace(ws: Workspace): void {
-    this.broadcast({ type: "WORKSPACE_CHANGED", workspace: ws });
-  }
-
-  async newWorkspace(name?: string): Promise<Workspace> {
-    const ws = await this.workspace.newWorkspace(name);
-    this.messages = [];
-    this.exchangeLogs = [];
-    this.resetTokenUsage();
-    this.runtime.setConversation([]);
-    return ws;
-  }
-
-  /** Binds the workspace conversation id into the current conversation. */
-  async bindWorkspace(ws: Workspace): Promise<void> {
-    const conv = await this.ensureConversation();
-    ws.conversationId = conv.id;
-    await this.store.saveWorkspace(ws);
-    this.broadcast({ type: "WORKSPACE_CHANGED", workspace: ws });
-  }
-
-  async workspaceAddTab(tabId: number, url: string, title: string, pinned: boolean): Promise<void> {
-    await this.workspace.addTab(tabId, { url, title }, pinned);
-  }
-
-  async workspaceRemoveTab(tabId: number): Promise<void> {
-    await this.workspace.removeTab(tabId, { keepFactsAsMemory: true });
-  }
-
-  async workspaceClear(): Promise<void> {
-    await this.workspace.clearWorkspace();
-  }
-
-  async workspacePinTab(tabId: number, pinned: boolean): Promise<void> {
-    await this.workspace.setTabPinned(tabId, pinned);
-  }
-
-  // -------------------------------------------------------------------------
-  // Conversation
-  // -------------------------------------------------------------------------
-
-  async sendUserMessage(text: string): Promise<{ ok: boolean; error?: string }> {
-    const trimmed = text.trim();
-    if (!trimmed) return { ok: false, error: "Empty message" };
     try {
-      await this.ensureConversation();
-      const result = await this.runtime.run(trimmed);
-      return { ok: result.status !== "failed", error: result.error };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  }
-
-  stopAgent(): void {
-    this.runtime.stop();
-  }
-
-  private async appendMessage(role: ChatMessageRecord["role"], content: string, toolCallId?: string, name?: string): Promise<void> {
-    const conv = await this.ensureConversation();
-    const msg: ChatMessageRecord = {
-      id: newId("msg"),
-      role,
-      content,
-      toolCallId,
-      name,
-      createdAt: Date.now(),
-      conversationId: conv.id,
-    };
-    this.messages.push(msg);
-    conv.messageIds.push(msg.id);
-    conv.updatedAt = Date.now();
-    await this.store.saveMessage(msg);
-    await this.store.saveConversation(conv);
-    this.broadcast({ type: "MESSAGE_ADDED", message: msg });
-  }
-
-  async newConversation(): Promise<void> {
-    const ws = this.workspace.getWorkspace();
-    const conv: ConversationRecord = {
-      id: newId("conv"),
-      title: "New conversation",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      messageIds: [],
-      tokenUsage: emptyTokenUsage(this.settings.provider.contextLimitTokens),
-    };
-    this.conversation = conv;
-    this.messages = [];
-    this.activity = [];
-    this.actionLog = [];
-    this.exchangeLogs = [];
-    this.tokenUsage = emptyTokenUsage(this.settings.provider.contextLimitTokens);
-    this.runtime.setConversation([]);
-    await this.store.saveConversation(conv);
-    if (ws) {
-      ws.conversationId = conv.id;
-      await this.store.saveWorkspace(ws);
-    }
-    this.broadcast({ type: "CONVERSATION_RESET", conversationId: conv.id });
-    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
-  }
-
-  async clearConversation(): Promise<void> {
-    const conv = this.conversation;
-    if (!conv) return;
-    await this.store.clearConversationMessages(conv.id);
-    this.messages = [];
-    this.activity = [];
-    this.actionLog = [];
-    this.exchangeLogs = [];
-    this.resetTokenUsage();
-    this.runtime.setConversation([]);
-    conv.messageIds = [];
-    conv.tokenUsage = { ...this.tokenUsage };
-    conv.updatedAt = Date.now();
-    await this.store.saveConversation(conv);
-    this.broadcast({ type: "CONVERSATION_RESET", conversationId: conv.id });
-  }
-
-  // -------------------------------------------------------------------------
-  // Memory maintenance
-  // -------------------------------------------------------------------------
-
-  async deleteAllLocalData(): Promise<void> {
-    await this.store.clearAll();
-    this.messages = [];
-    this.activity = [];
-    this.actionLog = [];
-    this.devEvents = [];
-    this.exchangeLogs = [];
-    this.resetTokenUsage();
-    this.conversation = null;
-    this.runtime.setConversation([]);
-    await this.workspace.newWorkspace();
-    await this.ensureConversation();
-  }
-
-  // -------------------------------------------------------------------------
-  // Logs & dev
-  // -------------------------------------------------------------------------
-
-  getDevEvents(): DevEvent[] {
-    return this.devEvents.slice(-200).map((e) => redact(e) as DevEvent);
-  }
-
-  /** Full request/response exchange logs for the dev panel export. */
-  getExchangeLogs(): LLMExchangeLog[] {
-    return this.exchangeLogs.slice().map((log) => redact(log) as LLMExchangeLog);
-  }
-
-  getActionLog(): ActionLogEntry[] {
-    return this.actionLog.slice(-100);
-  }
-
-  getActivity(): ToolActivityRecord[] {
-    return this.activity.slice(-50);
-  }
-
-  // -------------------------------------------------------------------------
-
-  private toLLMMessages(records: ChatMessageRecord[]): Parameters<AgentRuntime["setConversation"]>[0] {
-    return records.map((r) => ({
-      role: r.role,
-      content: r.content,
-      toolCallId: r.toolCallId,
-      name: r.name,
-    }));
-  }
-
-  private async recordUsage(
-    usage: LLMUsage | undefined,
-    estimatedInputTokens: number,
-    estimatedOutputTokens: number,
-    contextLimitTokens: number,
-  ): Promise<void> {
-    const inputTokens = usage?.inputTokens ?? estimatedInputTokens;
-    const outputTokens = usage?.outputTokens ?? estimatedOutputTokens;
-    const cacheReported = usage?.cachedInputTokens !== undefined
-      || usage?.cacheMissTokens !== undefined
-      || usage?.cacheWriteTokens !== undefined;
-    const cachedInputTokens = usage?.cachedInputTokens ?? 0;
-    const cacheMissTokens = usage?.cacheMissTokens
-      ?? (cacheReported ? Math.max(0, inputTokens - cachedInputTokens) : 0);
-
-    this.tokenUsage = {
-      inputTokens: this.tokenUsage.inputTokens + inputTokens,
-      outputTokens: this.tokenUsage.outputTokens + outputTokens,
-      cachedInputTokens: this.tokenUsage.cachedInputTokens + cachedInputTokens,
-      cacheMissTokens: this.tokenUsage.cacheMissTokens + cacheMissTokens,
-      cacheWriteTokens: this.tokenUsage.cacheWriteTokens + (usage?.cacheWriteTokens ?? 0),
-      requestCount: this.tokenUsage.requestCount + 1,
-      cacheReportingRequests: this.tokenUsage.cacheReportingRequests + (cacheReported ? 1 : 0),
-      estimatedRequests: this.tokenUsage.estimatedRequests + (usage?.inputTokens === undefined || usage?.outputTokens === undefined ? 1 : 0),
-      lastContextTokens: inputTokens,
-      contextLimitTokens: contextLimitTokens || this.tokenUsage.contextLimitTokens,
-    };
-
-    if (this.conversation) {
-      this.conversation.tokenUsage = { ...this.tokenUsage };
-      this.conversation.updatedAt = Date.now();
-      await this.store.saveConversation(this.conversation);
-    }
-    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
-
-    // Cache-hit feedback: when the provider reports cache stats but the hit
-    // rate stays low across several requests, warn the user so they can see
-    // the prefix isn't being cached (e.g. unstable system prompt, provider
-    // doesn't support caching for this model).
-    if (cacheReported && this.tokenUsage.cacheReportingRequests >= 3) {
-      const totalInput = this.tokenUsage.inputTokens || 1;
-      const hitRate = this.tokenUsage.cachedInputTokens / totalInput;
-      if (hitRate < 0.3) {
-        this.pushDevEvent({
-          kind: "cache_feedback",
-          ts: Date.now(),
-          hitRate,
-          requestCount: this.tokenUsage.cacheReportingRequests,
-          warning: `Low prompt-cache hit rate (${(hitRate * 100).toFixed(0)}%). The system prompt + tools prefix may not be cached by this provider.`,
-        });
+      let exactCounting = false;
+      if (provider.protocol === "responses" && adapter.countInput) {
+        try {
+          await adapter.countInput(baseRequest);
+          exactCounting = true;
+        } catch {
+          exactCounting = false;
+        }
       }
+      const result = await adapter.stream(baseRequest, () => undefined);
+      let explicitCaching = false;
+      let nativeCompaction = false;
+      if (provider.protocol === "responses") {
+        try {
+          await adapter.stream(
+            {
+              ...baseRequest,
+              settings: {
+                ...baseRequest.settings,
+                capabilities: { ...baseRequest.settings.capabilities, explicitCaching: true },
+              },
+            },
+            () => undefined,
+          );
+          explicitCaching = true;
+        } catch {
+          explicitCaching = false;
+        }
+        try {
+          await adapter.stream(
+            {
+              ...baseRequest,
+              settings: {
+                ...baseRequest.settings,
+                capabilities: { ...baseRequest.settings.capabilities, nativeCompaction: true },
+              },
+            },
+            () => undefined,
+          );
+          nativeCompaction = true;
+        } catch {
+          nativeCompaction = false;
+        }
+      }
+      const capabilities = providerCapabilitiesSchema.parse({
+        exactCounting,
+        explicitCaching,
+        nativeCompaction,
+        streamingUsage: !result.usage.estimated,
+      });
+      return { capabilities, message: result.text.trim() || "Connection succeeded" };
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
-  private resetTokenUsage(): void {
-    this.tokenUsage = emptyTokenUsage(this.settings.provider.contextLimitTokens);
-    this.broadcast({ type: "TOKEN_USAGE_UPDATED", usage: { ...this.tokenUsage } });
+  private async listProviderModels(provider: ProviderConnection) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      return { models: await fetchProviderModels(provider, controller.signal) };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async persistModelTurn(
+    run: RunRecord,
+    turn: number,
+    content: string,
+    toolCalls: ToolCall[],
+    status: "completed" | "failed",
+    actionsStarted: ToolCall["name"][] = [],
+  ): Promise<void> {
+    await this.repository.putModelTurn({
+      id: `${run.id}:model-turn:${turn}`,
+      conversationId: run.conversationId,
+      runId: run.id,
+      turn,
+      content: content.trim(),
+      tools: toolCalls.map((call) => call.name),
+      actionsStarted,
+      status,
+      createdAt: Date.now(),
+    });
+  }
+
+  private async createRunNote(
+    run: RunRecord,
+    request: string,
+    response: string,
+    sources: SourceReference[],
+  ): Promise<void> {
+    if (sources.length === 0) return;
+    const now = Date.now();
+    await this.repository.putNote({
+      id: createId("note"),
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      title: truncateToTokens(request, 24),
+      content: truncateToTokens(response, 220),
+      sources,
+      generated: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  private async updateRun(run: RunRecord, patch: Partial<RunRecord>): Promise<RunRecord> {
+    const next = {
+      ...run,
+      ...patch,
+      sequence: run.sequence + 1,
+      updatedAt: Date.now(),
+    };
+    // A stop arriving during persistence must not allow subsequent work to restart.
+    if (
+      this.currentRunId === run.id &&
+      this.abortController?.signal.aborted &&
+      !["cancelled", "failed"].includes(next.status)
+    ) {
+      this.abortController.signal.throwIfAborted();
+    }
+    await this.repository.putRun(next);
+    if (!["completed", "cancelled", "failed"].includes(next.status)) await this.pushState(run.id);
+    return next;
+  }
+
+  private async assertIdle(): Promise<void> {
+    if (this.abortController || (await this.repository.getActiveRun())) {
+      throw new Error("Another run is active. Stop it before changing state.");
+    }
+  }
+
+  private throwIfStopped(signal: AbortSignal, startedAt: number): void {
+    if (signal.aborted)
+      throw signal.reason instanceof Error ? signal.reason : new DOMException("Stopped", "AbortError");
+    if (Date.now() - startedAt > TOKEN_LIMITS.maxRunMs) throw new Error("The run reached its time limit");
+  }
+
+  private emit(type: AgentEvent["type"], payload: unknown, runId?: string): void {
+    this.emitEvent({
+      version: 1,
+      eventId: createId("event"),
+      runId,
+      sequence: this.eventSequence++,
+      type,
+      payload,
+    });
+  }
+
+  private async pushState(runId?: string): Promise<void> {
+    const sequence = ++this.snapshotSequence;
+    const state = await this.snapshot();
+    if (sequence === this.snapshotSequence) this.emit("state", state, runId);
   }
 }
 
-function emptyTokenUsage(contextLimitTokens: number): TokenUsageMetrics {
-  return {
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    cacheMissTokens: 0,
-    cacheWriteTokens: 0,
-    requestCount: 0,
-    cacheReportingRequests: 0,
-    estimatedRequests: 0,
-    lastContextTokens: 0,
-    contextLimitTokens,
-  };
+function traceFromSteps(steps: ConversationStep[]): TraceSegment[] {
+  const trace: TraceSegment[] = [];
+  for (const step of steps) {
+    if (step.text) trace.push({ kind: "tool_trace", content: step.text });
+    for (const call of step.toolCalls) {
+      const result = step.toolResults.find((entry) => entry.callId === call.id);
+      if (!result) continue;
+      trace.push({
+        kind: call.name === "read_page" ? "page" : "tool_trace",
+        content: `${call.name}(${stableStringify(call.arguments)}) => ${result.output}`,
+      });
+    }
+  }
+  return trace;
 }
 
-function normalizeTokenUsage(usage: TokenUsageMetrics | undefined, contextLimitTokens: number): TokenUsageMetrics {
-  return { ...emptyTokenUsage(contextLimitTokens), ...(usage ?? {}), contextLimitTokens };
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
-
-// Re-export helper so index.ts can build the registry once.
-export { createToolRegistry };
-export type { ConfirmationRequest };

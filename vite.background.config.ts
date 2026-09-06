@@ -8,8 +8,8 @@ export default defineConfig({
   build: {
     outDir: "dist/background",
     emptyOutDir: true,
-    sourcemap: true,
-    minify: false,
+    sourcemap: false,
+    minify: "esbuild",
     lib: {
       entry: resolve(__dirname, "src/background/index.ts"),
       formats: ["iife"],

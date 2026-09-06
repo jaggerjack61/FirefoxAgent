@@ -3,12 +3,14 @@
  * sidebar) sequentially, then copies static files (manifest, icons).
  */
 import { execSync } from "node:child_process";
-import { cpSync, mkdirSync, readdirSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const run = (cmd) => execSync(cmd, { cwd: ROOT, stdio: "inherit" });
+
+rmSync(join(ROOT, "dist"), { recursive: true, force: true });
 
 run("npx vite build --config vite.background.config.ts");
 run("npx vite build --config vite.content.config.ts");

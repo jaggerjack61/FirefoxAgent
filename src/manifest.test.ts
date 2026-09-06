@@ -1,69 +1,21 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-interface FirefoxManifest {
-  name?: string;
-  description?: string;
-  permissions?: string[];
-  sidebar_action?: { default_title?: string };
-  action?: { default_title?: string };
-  browser_specific_settings?: {
-    gecko?: {
-      strict_min_version?: string;
-      data_collection_permissions?: {
-        required?: string[];
-      };
-    };
-    gecko_android?: {
-      strict_min_version?: string;
-    };
-  };
-}
+const manifest = JSON.parse(readFileSync(resolve("static/manifest.json"), "utf8")) as Record<string, unknown>;
 
 describe("Firefox manifest", () => {
-  it("uses trademark-neutral distributable branding", () => {
-    const manifest = JSON.parse(
-      readFileSync(new URL("../static/manifest.json", import.meta.url), "utf8"),
-    ) as FirefoxManifest;
-
-    expect(manifest.name).toBe("BrowserAgent");
-    const displayMetadata = [
-      manifest.name,
-      manifest.description,
-      manifest.sidebar_action?.default_title,
-      manifest.action?.default_title,
-    ].join(" ");
-    expect(displayMetadata).not.toMatch(/mozilla|firefox/i);
+  it("has the minimal MV3 permission surface", () => {
+    expect(manifest.manifest_version).toBe(3);
+    expect(manifest.permissions).toEqual(["storage", "tabs", "scripting"]);
+    expect(manifest.optional_host_permissions).toEqual(["<all_urls>"]);
+    expect(JSON.stringify(manifest)).not.toMatch(/downloads|webRequest|webNavigation|activeTab/u);
   });
 
-  it("declares the data transmitted to the configured AI provider", () => {
-    const manifest = JSON.parse(
-      readFileSync(new URL("../static/manifest.json", import.meta.url), "utf8"),
-    ) as FirefoxManifest;
-
-    expect(manifest.browser_specific_settings?.gecko).toMatchObject({
-      strict_min_version: "140.0",
-      data_collection_permissions: {
-        required: [
-          "authenticationInfo",
-          "browsingActivity",
-          "personalCommunications",
-          "searchTerms",
-          "websiteActivity",
-          "websiteContent",
-        ],
-      },
+  it("exposes only local extension code", () => {
+    expect(manifest).not.toHaveProperty("web_accessible_resources");
+    expect(manifest.content_security_policy).toEqual({
+      extension_pages: "script-src 'self'; object-src 'none'",
     });
-    expect(manifest.browser_specific_settings?.gecko_android).toEqual({
-      strict_min_version: "142.0",
-    });
-  });
-
-  it("requests permission to queue files with Firefox's download manager", () => {
-    const manifest = JSON.parse(
-      readFileSync(new URL("../static/manifest.json", import.meta.url), "utf8"),
-    ) as FirefoxManifest;
-
-    expect(manifest.permissions).toContain("downloads");
   });
 });

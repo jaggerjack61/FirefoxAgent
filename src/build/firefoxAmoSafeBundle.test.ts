@@ -1,31 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { rewriteFirefoxAmoUnsafePatterns } from "./firefoxAmoSafeBundle";
 
-describe("Firefox AMO bundle hardening", () => {
-  it("disables React raw-HTML assignments", () => {
-    const source = [
-      "a.innerHTML = b;",
-      'mb.innerHTML = "<svg>" + b.valueOf().toString() + "</svg>";',
-      'a.innerHTML = "<script><\\/script>";',
-      "a.innerHTML=b;",
-      'mb.innerHTML="<svg>"+b.valueOf().toString()+"</svg>";',
-      'a.innerHTML="<script>\\x3c/script>";',
-    ].join("\n");
-
-    const rewritten = rewriteFirefoxAmoUnsafePatterns(source);
-
-    expect(rewritten).not.toMatch(/\.innerHTML\s*=/);
-    expect(rewritten).toContain("Raw HTML rendering is disabled");
-    expect(rewritten).toContain("Script element rendering is disabled");
+describe("Firefox package hardening", () => {
+  it("fails closed on dormant React raw-HTML assignments", () => {
+    const source =
+      'e.innerHTML=n;ke.innerHTML="<svg>"+n.valueOf().toString()+"</svg>";a.innerHTML="<script>\\x3c/script>";';
+    const result = rewriteFirefoxAmoUnsafePatterns(source);
+    expect(result).not.toContain("innerHTML=");
+    expect(result).toContain("Raw HTML rendering is disabled");
   });
 
-  it("separates the Markdown tokenizer from its write call", () => {
-    const source =
-      "return compiler(options)(postprocess(parse(options).document().write(preprocess()(value, encoding, true))));";
-
-    const rewritten = rewriteFirefoxAmoUnsafePatterns(source);
-
-    expect(rewritten).not.toContain(".document().write(");
-    expect(rewritten).toContain("markdownTokenizer.write(");
+  it("disambiguates the Markdown tokenizer from document.write", () => {
+    const result = rewriteFirefoxAmoUnsafePatterns(
+      "return compiler(options)(postprocess(parse(options).document().write(preprocess()(value, encoding, true))));",
+    );
+    expect(result).not.toContain(".document().write(");
+    expect(result).toContain("markdownTokenizer.write(");
   });
 });

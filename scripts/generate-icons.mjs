@@ -113,7 +113,7 @@ function drawIcon(x, y) {
   // Sparkle top-right.
   const star =
     circle(x, y, 0.76, 0.24, 0.05) ||
-    circle(x, y, 0.76, 0.24, 0.012) && x > 0.76 - 0.02 && x < 0.76 + 0.02 ||
+    (circle(x, y, 0.76, 0.24, 0.012) && x > 0.76 - 0.02 && x < 0.76 + 0.02) ||
     (Math.abs(x - 0.76) < 0.012 && y > 0.19 && y < 0.29 ? 1 : 0) ||
     (Math.abs(y - 0.24) < 0.012 && x > 0.71 && x < 0.81 ? 1 : 0);
   if (star && bubble === 0) {
