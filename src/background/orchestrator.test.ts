@@ -4,7 +4,13 @@ import { IndexedDbRepository } from "@/persistence/repository";
 import * as providers from "@/providers";
 import type { ProviderTurnResult } from "@/providers/types";
 import { SettingsRepository } from "@/settings/repository";
-import { appSettingsSchema, DEFAULT_SETTINGS, type ToolCall } from "@/shared/schema";
+import {
+  appSettingsSchema,
+  DEFAULT_SETTINGS,
+  type ProviderSettings,
+  type RunRecord,
+  type ToolCall,
+} from "@/shared/schema";
 import { providerRequest } from "@/test/providerFixture";
 import { FirefoxGateway } from "./firefoxGateway";
 import { Orchestrator } from "./orchestrator";
@@ -29,7 +35,7 @@ function result(toolCalls: ToolCall[] = []): ProviderTurnResult {
   };
 }
 
-async function setup(call?: ToolCall) {
+async function setup(call?: ToolCall, overrides: Partial<ProviderSettings> = {}) {
   const gateway = new FirefoxGateway();
   vi.spyOn(gateway, "registerContentScript").mockResolvedValue();
   vi.spyOn(gateway, "hasSiteAccess").mockResolvedValue(true);
@@ -38,7 +44,7 @@ async function setup(call?: ToolCall) {
   vi.spyOn(gateway, "execute").mockResolvedValue({ output: { status: "succeeded" } });
   vi.spyOn(SettingsRepository.prototype, "load").mockResolvedValue({
     ...DEFAULT_SETTINGS,
-    provider: providerRequest().settings,
+    provider: { ...providerRequest().settings, ...overrides },
   });
   const stream = vi.fn().mockResolvedValue(result());
   if (call) stream.mockResolvedValueOnce(result([call]));
@@ -366,6 +372,82 @@ describe("Orchestrator action lifecycle", () => {
     const workspace = await repository.getWorkspace();
     expect(await repository.listMessages(workspace.conversationId)).toEqual([
       expect.objectContaining({ role: "user" }),
+    ]);
+  });
+
+  it("keeps working past every default ceiling when unlimited turns is enabled", async () => {
+    const read: ToolCall = { id: "read", name: "read_page", arguments: { tabId: 1, query: "next" } };
+    const { orchestrator, stream } = await setup(undefined, { maxThinkingTurns: 1, unlimitedTurns: true });
+    for (let index = 0; index < 30; index += 1)
+      stream.mockResolvedValueOnce(result([{ ...read, id: `read-${index}` }]));
+    const { runId } = await start(orchestrator);
+    await expectStatus(runId, "completed");
+    // 31 turns and 30 actions: beyond both the 12-turn and 25-action defaults.
+    expect(await repository.getRun(runId)).toMatchObject({ turnCount: 31, actionCount: 30 });
+  });
+
+  it("still enforces the configured turn limit when unlimited turns is off", async () => {
+    const read: ToolCall = { id: "read", name: "read_page", arguments: { tabId: 1, query: "next" } };
+    const { orchestrator, stream } = await setup(undefined, { maxThinkingTurns: 2 });
+    stream.mockResolvedValue(result([read]));
+    const { runId } = await start(orchestrator);
+    await expectStatus(runId, "failed");
+    expect(await repository.getRun(runId)).toMatchObject({
+      turnCount: 2,
+      error: expect.stringContaining("turn"),
+    });
+  });
+
+  it("keeps run sequences monotonic and reports executing after an approval", async () => {
+    const { orchestrator, gateway } = await setup({ id: "submit", name: "submit", arguments: { handle } });
+    const writes: RunRecord[] = [];
+    const putRun = repository.putRun.bind(repository);
+    const spy = vi.spyOn(repository, "putRun").mockImplementation(async (run) => {
+      writes.push(run);
+      await putRun(run);
+    });
+    let statusDuringAction: string | undefined;
+    vi.mocked(gateway.execute).mockImplementationOnce(async () => {
+      statusDuringAction = (await repository.getActiveRun())?.status;
+      return { output: { status: "succeeded" } };
+    });
+    try {
+      const { runId } = await start(orchestrator);
+      const pending = await vi.waitFor(async () => {
+        const state = (await orchestrator.handle({ version: 1, requestId: "s", type: "get_state" })) as {
+          pendingConfirmation: { intent: { id: string } } | null;
+        };
+        expect(state.pendingConfirmation).not.toBeNull();
+        return state.pendingConfirmation!;
+      });
+      await orchestrator.handle({
+        version: 1,
+        requestId: "approve",
+        type: "confirm_action",
+        actionId: pending.intent.id,
+        approved: true,
+      });
+      await expectStatus(runId, "completed");
+      expect(statusDuringAction).toBe("executing");
+      const sequences = writes.filter((run) => run.id === runId).map((run) => run.sequence);
+      expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+      expect(new Set(sequences).size).toBe(sequences.length);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("shows provider reasoning locally but never replays it to the model", async () => {
+    const read: ToolCall = { id: "read", name: "read_page", arguments: { tabId: 1, query: "price" } };
+    const { orchestrator, stream } = await setup();
+    stream.mockResolvedValueOnce({ ...result([read]), text: "", reasoning: "Private chain of thought" });
+    const { runId } = await start(orchestrator);
+    await expectStatus(runId, "completed");
+    const replayed = stream.mock.calls[1]?.[0] as { steps: Array<{ text: string }> };
+    expect(replayed.steps[0]?.text).toBe("");
+    const workspace = await repository.getWorkspace();
+    expect(await repository.listModelTurns(workspace.conversationId)).toEqual([
+      expect.objectContaining({ content: "Private chain of thought" }),
     ]);
   });
 });

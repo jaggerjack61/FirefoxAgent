@@ -1,5 +1,5 @@
 import { abortable } from "@/shared/abort";
-import { pruneSupersededReads } from "@/context/observations";
+import { maskStaleObservations, pruneSupersededReads } from "@/context/observations";
 import { serializeToolResult } from "@/tools/results";
 import { ContextBudgetError, ContextCompiler, type TraceSegment } from "@/context/compiler";
 import { IndexedDbRepository, type Repository } from "@/persistence/repository";
@@ -16,6 +16,7 @@ import {
   makeTokenPolicy,
   providerCapabilitiesSchema,
   providerSettingsSchema,
+  runLimits,
   type ActionIntent,
   type AgentEvent,
   type AppSettings,
@@ -41,6 +42,9 @@ interface PendingResolver {
   intent: ActionIntent;
   resolve: (approved: boolean) => void;
 }
+
+/** setTimeout overflows (and fires immediately) above this delay. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** Abort reason for the run deadline. Node's DOMException extends Error, so a
  * dedicated class is the only reliable way to distinguish timeouts from Stop. */
@@ -273,11 +277,17 @@ export class Orchestrator {
     let finalText = "";
     const provider = createProvider(providerSettings);
     const policy = makeTokenPolicy(providerSettings.contextWindow, providerSettings.maxOutputTokens);
-    const deadline = setTimeout(() => controller.abort(new RunTimeoutError()), TOKEN_LIMITS.maxRunMs);
+    const limits = runLimits(providerSettings, policy);
+    // Unlimited runs have no deadline; Stop is the only way to end them early.
+    const deadline =
+      limits.durationMs <= MAX_TIMER_MS
+        ? setTimeout(() => controller.abort(new RunTimeoutError()), limits.durationMs)
+        : undefined;
+    const traceHighWater = Math.min(Math.floor(policy.inputSoftLimit / 2), TOKEN_LIMITS.traceHighWater);
 
     try {
-      for (let turn = 0; turn < providerSettings.maxThinkingTurns; turn += 1) {
-        this.throwIfStopped(controller.signal, run.createdAt);
+      for (let turn = 0; turn < limits.turns; turn += 1) {
+        this.throwIfStopped(controller.signal, run.createdAt, limits.durationMs);
         const workspace = await this.repository.getWorkspace();
         const [messages, notes, activeTab] = await Promise.all([
           this.repository.listMessages(workspace.conversationId),
@@ -285,6 +295,7 @@ export class Orchestrator {
           abortable(controller.signal, () => this.gateway.activeTab()),
         ]);
         pruneSupersededReads(steps);
+        maskStaleObservations(steps, traceHighWater, Math.floor(traceHighWater / 2));
         const trace = traceFromSteps(steps);
         const compilation = this.compiler.compile({
           runId: run.id,
@@ -340,7 +351,7 @@ export class Orchestrator {
         }
 
         const estimatedTotal = run.estimatedTokens + compilation.plan.estimatedInput;
-        if (estimatedTotal > policy.runLimit) throw new Error("The run reached its configured token limit");
+        if (estimatedTotal > limits.tokens) throw new Error("The run reached its configured token limit");
         run = await this.updateRun(run, {
           status: "responding",
           turnCount: turn + 1,
@@ -426,10 +437,12 @@ export class Orchestrator {
           }
           throw error;
         }
-        this.throwIfStopped(controller.signal, run.createdAt);
-        finalText = result.text || streamedText;
+        this.throwIfStopped(controller.signal, run.createdAt, limits.durationMs);
+        // Only the answer text is replayed to the model; streamed reasoning is display-only.
+        finalText = result.text;
+        const visibleText = streamedText || result.reasoning || result.text;
         if (result.toolCalls.length > 0) {
-          await this.persistModelTurn(run, turn, finalText, result.toolCalls, "completed");
+          await this.persistModelTurn(run, turn, visibleText, result.toolCalls, "completed");
         }
         const usage = persistedUsage(
           createId("usage"),
@@ -444,9 +457,9 @@ export class Orchestrator {
         );
         await this.repository.putUsage(usage);
         run = await this.updateRun(run, { actualTokens: run.actualTokens + usage.total });
-        if (run.actualTokens > policy.runLimit) throw new Error("The run reached its configured token limit");
+        if (run.actualTokens > limits.tokens) throw new Error("The run reached its configured token limit");
         if (result.incomplete) {
-          if (finalText.trim()) await this.persistModelTurn(run, turn, finalText, [], "failed");
+          if (visibleText.trim()) await this.persistModelTurn(run, turn, visibleText, [], "failed");
           throw new Error("The provider stopped because its output limit was reached");
         }
 
@@ -477,15 +490,23 @@ export class Orchestrator {
 
         const actionsStarted: ToolCall["name"][] = [];
         for (const call of result.toolCalls) {
-          this.throwIfStopped(controller.signal, run.createdAt);
-          if (run.actionCount >= TOKEN_LIMITS.maxActions)
-            throw new Error("The run reached its browser-action limit");
+          this.throwIfStopped(controller.signal, run.createdAt, limits.durationMs);
+          if (run.actionCount >= limits.actions) throw new Error("The run reached its browser-action limit");
           run = await this.updateRun(run, { status: "executing" });
           let execution: { output: string; source?: SourceReference };
           try {
-            execution = await this.executeTool(run, call, controller.signal, () => {
-              actionsStarted.push(call.name);
-            });
+            execution = await this.executeTool(
+              run,
+              call,
+              controller.signal,
+              () => {
+                actionsStarted.push(call.name);
+              },
+              // Keep the caller's run record current so sequences stay monotonic.
+              async (status) => {
+                run = await this.updateRun(run, { status });
+              },
+            );
           } catch (toolError) {
             // A failed tool (e.g. STALE_HANDLE after page churn) is data for
             // the model, not a fatal run error: report it as the tool result
@@ -497,13 +518,13 @@ export class Orchestrator {
               await this.persistModelTurn(
                 run,
                 turn,
-                finalText,
+                visibleText,
                 result.toolCalls,
                 "completed",
                 actionsStarted,
               );
           }
-          this.throwIfStopped(controller.signal, run.createdAt);
+          this.throwIfStopped(controller.signal, run.createdAt, limits.durationMs);
           step.toolResults.push({ callId: call.id, output: execution.output });
           if (execution.source && !sources.some((source) => source.url === execution.source?.url))
             sources.push(execution.source);
@@ -522,7 +543,7 @@ export class Orchestrator {
       });
       this.emit(cancelled ? "notice" : "error", { message: run.error }, run.id);
     } finally {
-      clearTimeout(deadline);
+      if (deadline !== undefined) clearTimeout(deadline);
       if (this.pending?.intent.runId === run.id) {
         this.pending.resolve(false);
         this.pending = null;
@@ -541,8 +562,10 @@ export class Orchestrator {
     call: ToolCall,
     signal: AbortSignal,
     onMutationStarted: () => void,
+    setStatus: (status: RunRecord["status"]) => Promise<void>,
   ): Promise<{ output: string; source?: SourceReference }> {
-    this.throwIfStopped(signal, run.createdAt);
+    if (signal.aborted)
+      throw signal.reason instanceof Error ? signal.reason : new DOMException("Stopped", "AbortError");
     const input = parseToolInput(call.name, call.arguments);
     let target: TargetDescriptor | undefined;
     if (["click", "fill", "select", "set_checked", "submit"].includes(call.name)) {
@@ -572,7 +595,7 @@ export class Orchestrator {
     });
 
     if (requiresConfirmation(run.mode, intent.classification)) {
-      await this.updateRun(run, { status: "awaiting_confirmation" });
+      await setStatus("awaiting_confirmation");
       const approved = await this.requestConfirmation(intent, signal);
       await this.repository.putAction({
         ...intent,
@@ -581,13 +604,14 @@ export class Orchestrator {
         updatedAt: Date.now(),
       });
       if (!approved) return { output: stableStringify({ status: "denied_by_user" }) };
+      await setStatus("executing");
     }
 
     await this.repository.putAction({ ...intent, status: "started", createdAt: now, updatedAt: Date.now() });
     let result;
     let dispatched = false;
     try {
-      this.throwIfStopped(signal, run.createdAt);
+      signal.throwIfAborted();
       result = await abortable(signal, () => {
         dispatched = true;
         if (intent.classification !== "read") onMutationStarted();
@@ -856,10 +880,10 @@ export class Orchestrator {
     }
   }
 
-  private throwIfStopped(signal: AbortSignal, startedAt: number): void {
+  private throwIfStopped(signal: AbortSignal, startedAt: number, durationMs: number): void {
     if (signal.aborted)
       throw signal.reason instanceof Error ? signal.reason : new DOMException("Stopped", "AbortError");
-    if (Date.now() - startedAt > TOKEN_LIMITS.maxRunMs) throw new Error("The run reached its time limit");
+    if (Date.now() - startedAt > durationMs) throw new Error("The run reached its time limit");
   }
 
   private emit(type: AgentEvent["type"], payload: unknown, runId?: string): void {

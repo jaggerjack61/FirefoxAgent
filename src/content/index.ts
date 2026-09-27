@@ -1,12 +1,13 @@
 import {
   contentCommandSchema,
+  formatHandle,
   pageSnapshotSchema,
   type ContentCommand,
   type ElementHandle,
   type PageElement,
 } from "@/shared/schema";
 import { abortableDelay } from "@/shared/abort";
-import { contentHash, lexicalScore } from "@/shared/token";
+import { lexicalScore } from "@/shared/token";
 import { HandleRegistry } from "./handleRegistry";
 import {
   accessibleName,
@@ -154,14 +155,11 @@ function installContentRuntime(): void {
               ? "list"
               : element.tagName === "TR"
                 ? "table"
-                : "text";
+                : undefined;
           const boilerplate = element.closest("nav,header,footer,aside") ? 0.1 : 0;
-          for (const [index, passage] of splitPassage(text).entries()) {
+          for (const passage of splitPassage(text)) {
             const score = lexicalScore(query, passage) + (kind === "heading" ? 0.05 : 0) - boilerplate;
-            items.push({
-              block: { id: `b:${contentHash(text)}:${index}`, kind, text: passage, score },
-              score,
-            });
+            items.push({ block: kind ? { kind, text: passage } : { text: passage }, score });
           }
         }
       if (mode !== "text")
@@ -172,7 +170,8 @@ function installContentRuntime(): void {
           const role = semanticRole(element);
           const fullName = accessibleName(element);
           const name = fullName.slice(0, 180);
-          const state: PageElement["state"] = {};
+          const state: NonNullable<PageElement["state"]> = {};
+          let options: PageElement["options"];
           if (fullName.length > 180) state.nameTruncated = true;
           if (isDisabled(element)) state.disabled = true;
           for (const attribute of ["expanded", "checked", "selected", "required", "readonly", "invalid"]) {
@@ -196,30 +195,40 @@ function installContentRuntime(): void {
           }
           if (element instanceof HTMLSelectElement) {
             // Expose choices, never the existing selected value. Query ranks large option lists.
-            const options = [...element.options].sort(
+            const choices = [...element.options].sort(
               (a, b) => lexicalScore(query, b.text) - lexicalScore(query, a.text),
             );
-            state.options = JSON.stringify(
-              options.slice(0, 6).map((option) => ({
-                // Never invent a clipped option value that cannot be selected.
-                ...(option.value.length <= 80 ? { value: option.value } : { valueOmitted: true }),
-                label: normalizeText(option.text).slice(0, 120),
-                ...(normalizeText(option.text).length > 120 ? { labelTruncated: true } : {}),
-                disabled:
-                  option.disabled ||
-                  (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled),
-              })),
-            );
-            if (options.length > 6)
-              state.optionsHint = `${options.length} choices; query an option label to find more`;
+            options = choices.slice(0, 6).map((option) => {
+              const label = normalizeText(option.text);
+              const disabled =
+                option.disabled ||
+                (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled);
+              return {
+                label: label.slice(0, 120),
+                // select matches a value or a visible label; repeat the value only when it differs,
+                // and never invent a clipped value that cannot be selected.
+                ...(option.value !== label && option.value.length <= 80 ? { value: option.value } : {}),
+                ...(label.length > 120 ? { labelTruncated: true as const } : {}),
+                ...(disabled ? { disabled: true as const } : {}),
+              };
+            });
+            if (choices.length > 6)
+              state.optionsHint = `${choices.length} choices; query an option label to find more`;
           }
           if (element instanceof HTMLAnchorElement) {
             state.href = element.href.slice(0, 240);
             if (element.href.length > 240) state.hrefTruncated = true;
           }
-          const score = lexicalScore(query, `${role} ${fullName} ${state.options ?? ""}`) + 0.02;
+          const optionText = options?.map((option) => option.label).join(" ") ?? "";
+          const score = lexicalScore(query, `${role} ${fullName} ${optionText}`) + 0.02;
           items.push({
-            element: { handle: handles.bind(element, tabId, frameId), role, name, state },
+            element: {
+              handle: formatHandle(handles.bind(element, tabId, frameId)),
+              role,
+              name,
+              ...(Object.keys(state).length ? { state } : {}),
+              ...(options ? { options } : {}),
+            },
             score,
           });
         }
@@ -232,7 +241,6 @@ function installContentRuntime(): void {
       {
         tabId,
         frameId,
-        revision: handles.revision,
         url: location.href,
         title: document.title.slice(0, 180),
         query,

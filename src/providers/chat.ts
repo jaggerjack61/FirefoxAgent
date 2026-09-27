@@ -28,11 +28,13 @@ interface AccumulatedTool {
  * Accumulates Chat Completions events. Accepts both streamed SSE chunks
  * (choices[].delta) and complete non-streaming bodies (choices[].message), so
  * gateways that ignore `stream: true` still produce output. Reasoning models
- * put visible thinking in `reasoning_content`; we surface that as commentary
- * too so the UI is never blank.
+ * put visible thinking in `reasoning_content` (or `reasoning`); it is streamed
+ * as commentary so the UI is never blank, but kept out of `text`, which is
+ * replayed to the model on every later turn and becomes the final answer.
  */
 export class ChatStreamAccumulator {
   text = "";
+  reasoning = "";
   incomplete = false;
   usage: ProviderUsage | null = null;
   private readonly calls = new Map<number, AccumulatedTool>();
@@ -53,12 +55,17 @@ export class ChatStreamAccumulator {
       if (record.finish_reason === "length") this.incomplete = true;
       const delta = (record.delta ?? record.message) as Record<string, unknown> | undefined;
       if (!delta || typeof delta !== "object") continue;
-      for (const field of ["content", "reasoning_content"] as const) {
-        const chunk = delta[field];
-        if (typeof chunk === "string" && chunk) {
-          this.text += chunk;
-          deltas.push(chunk);
-        }
+      // Some gateways mirror the same thinking into both fields; take one.
+      const thinking = [delta.reasoning_content, delta.reasoning].find(
+        (chunk): chunk is string => typeof chunk === "string" && chunk.length > 0,
+      );
+      if (thinking) {
+        this.reasoning += thinking;
+        deltas.push(thinking);
+      }
+      if (typeof delta.content === "string" && delta.content) {
+        this.text += delta.content;
+        deltas.push(delta.content);
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const item of delta.tool_calls) {
@@ -111,19 +118,24 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     let usage = accumulator.usage ?? estimatedUsage(request.compilation.plan.estimatedInput);
     if (accumulator.usage) onEvent({ type: "usage", usage: accumulator.usage });
     const toolCalls = accumulator.toolCalls();
-    if (!accumulator.text.trim() && toolCalls.length === 0 && !accumulator.incomplete) {
+    // A reasoning-only final turn still answers the user rather than failing the run.
+    const text = accumulator.text.trim() || toolCalls.length > 0 ? accumulator.text : accumulator.reasoning;
+    if (!text.trim() && toolCalls.length === 0 && !accumulator.incomplete) {
       throw new Error(
         "Provider returned no text or tool calls. Check the API base URL, protocol, and model.",
       );
     }
     if (usage.estimated) {
-      usage = {
-        ...usage,
-        output: estimateTokens(accumulator.text + stableStringify(toolCalls)),
-        total: usage.input + estimateTokens(accumulator.text + stableStringify(toolCalls)),
-      };
+      const output = estimateTokens(accumulator.reasoning + accumulator.text + stableStringify(toolCalls));
+      usage = { ...usage, output, total: usage.input + output };
     }
-    return { text: accumulator.text, toolCalls, usage, incomplete: accumulator.incomplete };
+    return {
+      text,
+      ...(accumulator.reasoning ? { reasoning: accumulator.reasoning } : {}),
+      toolCalls,
+      usage,
+      incomplete: accumulator.incomplete,
+    };
   }
 
   async compact(request: CompactRequest): Promise<CompactResult> {
@@ -162,11 +174,16 @@ export function buildChatPayload(request: ProviderRequest): Record<string, unkno
     messages.push({
       role: "assistant",
       content: step.text || null,
-      tool_calls: step.toolCalls.map((call) => ({
-        id: call.id,
-        type: "function",
-        function: { name: call.name, arguments: stableStringify(call.arguments) },
-      })),
+      // An empty tool_calls array is rejected by several endpoints.
+      ...(step.toolCalls.length
+        ? {
+            tool_calls: step.toolCalls.map((call) => ({
+              id: call.id,
+              type: "function",
+              function: { name: call.name, arguments: stableStringify(call.arguments) },
+            })),
+          }
+        : {}),
     });
     for (const result of step.toolResults) {
       messages.push({ role: "tool", tool_call_id: result.callId, content: result.output });

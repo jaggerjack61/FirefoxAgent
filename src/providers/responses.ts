@@ -1,4 +1,5 @@
 import { toolCallSchema, type ToolCall } from "@/shared/schema";
+import { PROMPT_VERSION, TOOL_SCHEMA_VERSION } from "@/context/compiler";
 import { contentHash, createId, estimateTokens, stableStringify } from "@/shared/token";
 import {
   ProviderHttpError,
@@ -95,6 +96,8 @@ export class ResponsesAdapter implements ProviderAdapter {
     let toolCalls = rawOutput.flatMap(parseResponseToolCall);
     if (toolCalls.length === 0) toolCalls = chat.toolCalls();
     if (!text) text = outputText(rawOutput) || chat.text;
+    // Translated reasoning is display-only unless it is all the provider returned.
+    if (!text.trim() && toolCalls.length === 0) text = chat.reasoning;
     if (usage.estimated && chat.usage) {
       usage = chat.usage;
       onEvent({ type: "usage", usage });
@@ -113,6 +116,7 @@ export class ResponsesAdapter implements ProviderAdapter {
     }
     return {
       text,
+      ...(chat.reasoning ? { reasoning: chat.reasoning } : {}),
       toolCalls,
       rawResponseOutput: rawOutput.length ? rawOutput : undefined,
       usage,
@@ -196,8 +200,9 @@ export function buildResponsesPayload(request: ProviderRequest, stream: boolean)
     truncation: "disabled",
   };
   if (explicitCaching) {
+    // Versioned so a prompt or tool-schema change starts a fresh cache entry.
     payload.prompt_cache_key = contentHash(
-      ["browseragent-v1", "browser-tools-v1", request.settings.protocol, request.settings.model].join(":"),
+      [PROMPT_VERSION, TOOL_SCHEMA_VERSION, request.settings.protocol, request.settings.model].join(":"),
     );
     payload.prompt_cache_options = { mode: "explicit", ttl: "30m" };
   }

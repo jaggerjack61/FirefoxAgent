@@ -89,6 +89,8 @@ There is no model-supplied JavaScript, keyboard dispatch, file upload/download, 
 
 All modes still enforce URL restrictions, schema validation, stale-handle rejection, privacy filtering, token/action/time limits, and target-specific postcondition verification.
 
+Each provider profile sets a maximum number of thinking turns (default 12). The per-run action, time, and token ceilings scale with it. Enabling **Unlimited turns** removes all of these run ceilings, so a run continues until the model answers or you press Stop and its token usage is uncapped. Older tool results are still elided to keep each request within the context budget.
+
 ## Development commands
 
 ```bash

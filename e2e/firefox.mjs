@@ -115,7 +115,9 @@ try {
   const readPage = async (query, mode = "controls", cursor = null, maxTokens = 900) => {
     const result = await command({ type: "snapshot", tabId: 1, frameId: 0, query, mode, cursor, maxTokens });
     assert(!result.error, result.error);
-    assert(result.value.estimatedTokens <= maxTokens);
+    // Same byte-based estimate the content script budgets with.
+    assert(Math.ceil(Buffer.byteLength(JSON.stringify(result.value)) / 3.2) <= maxTokens);
+    assert(result.value.elements.every((element) => typeof element.handle === "string"));
     return result.value;
   };
   const target = async (query) => {

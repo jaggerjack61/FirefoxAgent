@@ -81,6 +81,33 @@ describe("Chat Completions adapter", () => {
     });
   });
 
+  it("answers with reasoning only when the provider returned nothing else", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([
+          { choices: [{ delta: { reasoning: "Only thoughts" }, finish_reason: "stop" }] },
+          "[DONE]",
+        ]),
+      ),
+    );
+    const result = await new ChatCompletionsAdapter().stream(
+      providerRequest("chat_completions"),
+      () => undefined,
+    );
+    expect(result).toMatchObject({ text: "Only thoughts", reasoning: "Only thoughts" });
+  });
+
+  it("never sends an empty tool_calls array for a text-only step", () => {
+    const request = providerRequest("chat_completions");
+    const payload = buildChatPayload({
+      ...request,
+      steps: [{ text: "Checked", toolCalls: [], toolResults: [] }],
+    });
+    const messages = payload.messages as Array<Record<string, unknown>>;
+    expect(messages.at(-1)).toEqual({ role: "assistant", content: "Checked" });
+  });
+
   it("surfaces reasoning_content and falls back to a non-streaming JSON body", async () => {
     vi.stubGlobal(
       "fetch",
@@ -97,7 +124,9 @@ describe("Chat Completions adapter", () => {
       if (event.type === "text_delta") deltas.push(event.text);
     });
     expect(deltas.join("")).toBe("Thinking hard… Done.");
-    expect(result.text).toBe("Thinking hard… Done.");
+    // Reasoning is display-only: it must not be replayed to the model or become the answer.
+    expect(result.text).toBe("Done.");
+    expect(result.reasoning).toBe("Thinking hard… ");
 
     vi.stubGlobal(
       "fetch",

@@ -13,6 +13,7 @@ export function providerRequest(protocol: ProviderProtocol = "responses"): Provi
     contextWindow: 32_000,
     maxOutputTokens: 2_048,
     maxThinkingTurns: 12,
+    unlimitedTurns: false,
     capabilities: {
       exactCounting: false,
       explicitCaching: false,

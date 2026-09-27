@@ -54,6 +54,11 @@ describe("groupThinking", () => {
     expect(afterAction[1]?.working).toBe(true);
   });
 
+  it("counts persisted and streaming steps and tracks the newest turn time", () => {
+    const groups = groupThinking([turn(0, [], []), turn(1, [], [])], { runId: "r", turn: 2, text: "" });
+    expect(groups[0]).toMatchObject({ steps: 3, updatedAt: 1, working: true });
+  });
+
   it("drops a stream whose turn is already persisted, avoiding duplicates", () => {
     const groups = groupThinking([turn(0, [], [])], { runId: "r", turn: 0, text: "live" });
     expect(groups).toHaveLength(1);

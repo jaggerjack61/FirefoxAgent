@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolName } from "@/shared/schema";
+import { handleInputSchema, type ToolName } from "@/shared/schema";
 import { TOKEN_LIMITS, estimateTokens, stableStringify } from "@/shared/token";
 
 type JsonSchema = Record<string, unknown>;
@@ -17,14 +17,7 @@ const object = (properties: JsonSchema, required: string[] = []): JsonSchema => 
   required,
 });
 
-const handleProperties = {
-  tabId: { type: "integer" },
-  frameId: { type: "integer", minimum: 0 },
-  revision: { type: "integer", minimum: 0 },
-  id: { type: "string" },
-};
-
-const HANDLE_SCHEMA = object(handleProperties, ["tabId", "frameId", "revision", "id"]);
+const HANDLE_SCHEMA = { type: "string", description: "Element handle from read_page" };
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
@@ -140,13 +133,6 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   },
 ] as const;
 
-const handleSchema = z.object({
-  tabId: z.number().int(),
-  frameId: z.number().int().nonnegative(),
-  revision: z.number().int().nonnegative(),
-  id: z.string(),
-});
-
 export const TOOL_INPUT_SCHEMAS: Record<ToolName, z.ZodTypeAny> = {
   list_tabs: z.object({ query: z.string().default(""), limit: z.number().int().min(1).max(50).default(30) }),
   open_tab: z.object({ url: z.string(), active: z.boolean().default(true) }),
@@ -184,11 +170,11 @@ export const TOOL_INPUT_SCHEMAS: Record<ToolName, z.ZodTypeAny> = {
     query: z.string().max(1_000).default(""),
     maxResults: z.number().int().min(1).max(50).default(20),
   }),
-  click: z.object({ handle: handleSchema }),
-  fill: z.object({ handle: handleSchema, value: z.string().max(50_000) }),
-  select: z.object({ handle: handleSchema, value: z.string().max(10_000) }),
-  set_checked: z.object({ handle: handleSchema, checked: z.boolean() }),
-  submit: z.object({ handle: handleSchema }),
+  click: z.object({ handle: handleInputSchema }),
+  fill: z.object({ handle: handleInputSchema, value: z.string().max(50_000) }),
+  select: z.object({ handle: handleInputSchema, value: z.string().max(10_000) }),
+  set_checked: z.object({ handle: handleInputSchema, checked: z.boolean() }),
+  submit: z.object({ handle: handleInputSchema }),
 };
 
 export const STABLE_TOOL_JSON = stableStringify(TOOL_DEFINITIONS);

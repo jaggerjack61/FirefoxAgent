@@ -14,6 +14,8 @@ export const TOKEN_LIMITS = {
   maxActions: 25,
   maxRunMs: 5 * 60_000,
   maxWaitMs: 15_000,
+  /** Current-run tool trace size that triggers eliding old tool outputs (see maskStaleObservations). */
+  traceHighWater: 16_000,
 } as const;
 
 export function estimateTokens(value: string): number {

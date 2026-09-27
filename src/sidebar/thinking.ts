@@ -10,6 +10,10 @@ export interface ThinkingGroup {
   key: string;
   contents: string[];
   tools: ToolName[];
+  /** Model turns in this group, including an in-flight stream. */
+  steps: number;
+  /** When the newest persisted turn in this group finished; null for a stream-only group. */
+  updatedAt: number | null;
   failed: boolean;
   working: boolean;
   /** The last turn in this group dispatched a browser mutation. */
@@ -29,9 +33,20 @@ export function groupThinking(turns: ModelTurnRecord[], stream: ActiveStreamLike
   for (const turn of [...turns].sort((a, b) => a.turn - b.turn)) {
     let group = groups.at(-1);
     if (!group || group.boundary) {
-      group = { key: turn.id, contents: [], tools: [], failed: false, working: false, boundary: false };
+      group = {
+        key: turn.id,
+        contents: [],
+        tools: [],
+        steps: 0,
+        updatedAt: null,
+        failed: false,
+        working: false,
+        boundary: false,
+      };
       groups.push(group);
     }
+    group.steps += 1;
+    group.updatedAt = turn.createdAt;
     if (turn.content) group.contents.push(turn.content);
     group.tools.push(...turn.tools);
     if (turn.status === "failed") group.failed = true;
@@ -41,12 +56,15 @@ export function groupThinking(turns: ModelTurnRecord[], stream: ActiveStreamLike
     const group = groups.at(-1);
     if (group && !group.boundary) {
       group.working = true;
+      group.steps += 1;
       if (stream.text) group.contents.push(stream.text);
     } else {
       groups.push({
         key: `active:${stream.runId}:${stream.turn}`,
         contents: stream.text ? [stream.text] : [],
         tools: [],
+        steps: 1,
+        updatedAt: null,
         failed: false,
         working: true,
         boundary: false,

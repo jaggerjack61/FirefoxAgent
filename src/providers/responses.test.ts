@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerRequest, sseResponse } from "@/test/providerFixture";
+import { PROMPT_VERSION, TOOL_SCHEMA_VERSION } from "@/context/compiler";
+import { contentHash } from "@/shared/token";
 import { ResponsesAdapter, buildResponsesPayload } from "./responses";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -31,6 +33,14 @@ describe("Responses adapter", () => {
     second.settings.model = "another-model";
     expect(buildResponsesPayload(first, true).prompt_cache_key).not.toBe(
       buildResponsesPayload(second, true).prompt_cache_key,
+    );
+  });
+
+  it("derives the cache key from the current prompt and tool-schema versions", () => {
+    const request = providerRequest();
+    request.settings.capabilities.explicitCaching = true;
+    expect(buildResponsesPayload(request, true).prompt_cache_key).toBe(
+      contentHash([PROMPT_VERSION, TOOL_SCHEMA_VERSION, "responses", "test-model"].join(":")),
     );
   });
 

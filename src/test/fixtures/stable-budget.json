@@ -1,7 +1,7 @@
 {
   "promptVersion": "browseragent-v2",
-  "toolSchemaVersion": "browser-tools-v3",
+  "toolSchemaVersion": "browser-tools-v4",
   "instructions": { "hash": "7669d3bb", "tokens": 276 },
-  "tools": { "hash": "de5b3276", "tokens": 1712 },
-  "stable": { "hash": "d405a4f7", "tokens": 1990 }
+  "tools": { "hash": "1bd13bea", "tokens": 1434 },
+  "stable": { "hash": "245b939f", "tokens": 1712 }
 }

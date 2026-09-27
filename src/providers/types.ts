@@ -43,6 +43,8 @@ export interface ProviderUsage {
 
 export interface ProviderTurnResult {
   text: string;
+  /** Visible provider reasoning, for local display only: never replayed as assistant content. */
+  reasoning?: string;
   toolCalls: ToolCall[];
   rawResponseOutput?: unknown[];
   usage: ProviderUsage;

@@ -1,4 +1,3 @@
-import { createId } from "@/shared/token";
 import { elementHandleSchema, type ElementHandle } from "@/shared/schema";
 
 export interface ElementIdentity {
@@ -27,7 +26,7 @@ export class HandleRegistry<T extends object & { isConnected: boolean }> {
 
   constructor(
     private readonly identityOf: (element: T) => ElementIdentity = defaultIdentity,
-    private readonly documentId = createId("doc"),
+    private readonly documentId = shortDocumentId(),
   ) {}
 
   bind(element: T, tabId: number, frameId: number): ElementHandle {
@@ -79,6 +78,13 @@ export class HandleRegistry<T extends object & { isConnected: boolean }> {
     // Hard cap so long-lived tabs on churning SPAs cannot leak memory.
     if (this.entries.size > 5_000) this.entries.clear();
   }
+}
+
+/** Distinguishes documents that reuse a tab/frame; handles are also identity-checked on resolve,
+ * so a short random ID is enough and keeps every handle in model context cheap. */
+function shortDocumentId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(5));
+  return [...bytes].map((byte) => (byte % 36).toString(36)).join("");
 }
 
 function sameIdentity(left: ElementIdentity, right: ElementIdentity): boolean {

@@ -3,7 +3,13 @@ import { contentHash, estimateTokens, stableStringify } from "@/shared/token";
 
 type Block = PageSnapshot["blocks"][number];
 export type SnapshotItem = { block: Block; score: number } | { element: PageElement; score: number };
-type Metadata = Omit<PageSnapshot, "blocks" | "elements" | "nextCursor" | "estimatedTokens">;
+type Metadata = Omit<PageSnapshot, "blocks" | "elements" | "nextCursor" | "warnings"> & {
+  query: string;
+  warnings: string[];
+};
+
+/** Handles embed the registry revision; unrelated DOM churn must not invalidate a cursor. */
+const withoutRevision = (handle: string) => handle.replace(/^(-?\d+\.\d+\.)\d+\./u, "$1");
 
 /** Budget the actual JSON, not just prose. Never cut a handle or cursor in half. */
 export function paginateSnapshot(
@@ -13,20 +19,18 @@ export function paginateSnapshot(
   maxTokens: number,
   mode = "all",
 ): PageSnapshot {
+  const { query, warnings, ...header } = metadata;
   const fingerprint = contentHash(
     stableStringify({
-      url: metadata.url,
-      query: metadata.query,
-      tabId: metadata.tabId,
-      frameId: metadata.frameId,
+      url: header.url,
+      query,
+      tabId: header.tabId,
+      frameId: header.frameId,
       mode,
       items: items.map((item) =>
         "block" in item
           ? item
-          : {
-              ...item,
-              element: { ...item.element, handle: { ...item.element.handle, revision: 0 } },
-            },
+          : { ...item, element: { ...item.element, handle: withoutRevision(item.element.handle) } },
       ),
     }),
   );
@@ -39,18 +43,13 @@ export function paginateSnapshot(
     if (!Number.isSafeInteger(start) || start >= items.length) throw new Error("Invalid page cursor");
   }
   const snapshot: PageSnapshot = {
-    ...metadata,
+    ...header,
     blocks: [],
     elements: [],
     nextCursor: null,
-    estimatedTokens: 0,
+    ...(warnings.length ? { warnings } : {}),
   };
-  const measure = () => {
-    // Fixed point includes the cost of the estimate itself.
-    for (let count = 0; count < 3; count += 1)
-      snapshot.estimatedTokens = estimateTokens(stableStringify(snapshot));
-    return snapshot.estimatedTokens;
-  };
+  const measure = () => estimateTokens(stableStringify(snapshot));
   for (let index = start; index < items.length; index += 1) {
     const item = items[index]!;
     if ("block" in item) snapshot.blocks.push(item.block);

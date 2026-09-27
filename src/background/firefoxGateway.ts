@@ -1,4 +1,4 @@
-import { abortable } from "@/shared/abort";
+import { abortable, abortableDelay } from "@/shared/abort";
 import { createId } from "@/shared/token";
 import {
   contentCommandSchema,
@@ -10,6 +10,11 @@ import { assertWebUrl, type TargetDescriptor } from "@/security/policy";
 
 const CONTENT_SCRIPT_ID = "browseragent-content-v1";
 const WEB_MATCHES = ["http://*/*", "https://*/*"];
+/** Bounded wait after a navigation so the next read sees the new document, not the old one. */
+const NAVIGATION_TIMEOUT_MS = 10_000;
+/** A navigation that never reports "loading" (same-document, no history entry) settles after this. */
+const NAVIGATION_GRACE_MS = 400;
+const NAVIGATION_POLL_MS = 100;
 
 export interface ToolExecution {
   output: Record<string, unknown>;
@@ -90,7 +95,8 @@ export class FirefoxGateway {
       case "open_tab": {
         const url = assertWebUrl(String(input.url));
         const tab = await browser.tabs.create({ url, active: Boolean(input.active ?? true) });
-        return { output: { tabId: tab.id, url: tab.url ?? url, opened: true } };
+        if (tab.id === undefined) return { output: { url, opened: true } };
+        return { output: { opened: true, ...(await this.settleNavigation(tab.id, signal)) } };
       }
       case "activate_tab": {
         const tabId = Number(input.tabId);
@@ -107,18 +113,18 @@ export class FirefoxGateway {
       case "navigate": {
         const tabId = Number(input.tabId);
         const url = assertWebUrl(String(input.url));
-        const tab = await browser.tabs.update(tabId, { url });
-        return { output: { tabId, url: tab.url ?? url, navigated: true } };
+        await browser.tabs.update(tabId, { url });
+        return { output: { navigated: true, ...(await this.settleNavigation(tabId, signal)) } };
       }
       case "go_back": {
         const tabId = Number(input.tabId);
         await browser.tabs.goBack(tabId);
-        return { output: { tabId, navigatedBack: true } };
+        return { output: { navigatedBack: true, ...(await this.settleNavigation(tabId, signal)) } };
       }
       case "reload": {
         const tabId = Number(input.tabId);
         await browser.tabs.reload(tabId);
-        return { output: { tabId, reloaded: true } };
+        return { output: { reloaded: true, ...(await this.settleNavigation(tabId, signal)) } };
       }
       case "list_frames": {
         const tabId = Number(input.tabId);
@@ -231,6 +237,39 @@ export class FirefoxGateway {
         return { output };
       }
     }
+  }
+
+  /**
+   * Wait until a just-started navigation finishes loading and report where the tab landed.
+   * This saves the model a wait_for/list_tabs turn and keeps read_page off a half-loaded or
+   * about:blank document. A timeout is reported, never treated as an error: the navigation
+   * itself was dispatched.
+   */
+  private async settleNavigation(
+    tabId: number,
+    signal?: AbortSignal,
+  ): Promise<{ tabId: number; url?: string; title?: string; loaded: boolean }> {
+    const started = Date.now();
+    let sawLoading = false;
+    let tab: browser.tabs.Tab | undefined;
+    while (Date.now() - started < NAVIGATION_TIMEOUT_MS) {
+      try {
+        tab = await abortable(signal, () => browser.tabs.get(tabId));
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        return { tabId, loaded: false }; // Closed or replaced while loading.
+      }
+      if (tab.status === "loading") sawLoading = true;
+      else if (sawLoading || Date.now() - started >= NAVIGATION_GRACE_MS) break;
+      await abortableDelay(NAVIGATION_POLL_MS, signal);
+    }
+    // Tool results are tightly budgeted: a clipped URL would be wrong if reused, so omit long ones.
+    return {
+      tabId,
+      ...(tab?.url && tab.url.length <= 200 ? { url: tab.url } : {}),
+      ...(tab?.title ? { title: tab.title.slice(0, 100) } : {}),
+      loaded: tab?.status !== "loading",
+    };
   }
 
   private async webTab(tabId: number): Promise<browser.tabs.Tab> {

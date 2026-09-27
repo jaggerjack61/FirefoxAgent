@@ -31,9 +31,31 @@ export const providerSettingsSchema = z.object({
     .default(TOKEN_LIMITS.defaultContext),
   maxOutputTokens: z.number().int().min(256).max(128_000).default(TOKEN_LIMITS.defaultOutputReserve),
   maxThinkingTurns: z.number().int().min(1).default(TOKEN_LIMITS.maxTurns),
+  /** Run until the model answers or the user stops it: no turn, action, time, or run-token ceiling. */
+  unlimitedTurns: z.boolean().default(false),
   capabilities: providerCapabilitiesSchema.default({}),
 });
 export type ProviderSettings = z.infer<typeof providerSettingsSchema>;
+
+export interface RunLimits {
+  turns: number;
+  actions: number;
+  durationMs: number;
+  tokens: number;
+}
+
+/** Operational ceilings scale with the configured turn budget so raising it is never silently capped. */
+export function runLimits(settings: ProviderSettings, policy: TokenPolicy): RunLimits {
+  if (settings.unlimitedTurns)
+    return { turns: Infinity, actions: Infinity, durationMs: Infinity, tokens: Infinity };
+  const scale = Math.max(1, settings.maxThinkingTurns / TOKEN_LIMITS.maxTurns);
+  return {
+    turns: settings.maxThinkingTurns,
+    actions: Math.ceil(TOKEN_LIMITS.maxActions * scale),
+    durationMs: Math.ceil(TOKEN_LIMITS.maxRunMs * scale),
+    tokens: Math.ceil(policy.runLimit * scale),
+  };
+}
 
 export const tokenPolicySchema = z.object({
   contextWindow: z.number().int().min(TOKEN_LIMITS.minimumContext),
@@ -294,33 +316,70 @@ export const elementHandleSchema = z.object({
 });
 export type ElementHandle = z.infer<typeof elementHandleSchema>;
 
+// Model-facing handles are one opaque string, "tabId.frameId.revision.id": a quarter of
+// the tokens of the JSON object, in every page read and every action call.
+const HANDLE_PATTERN = /^(-?\d+)\.(\d+)\.(\d+)\.(\S+)$/u;
+
+export function formatHandle(handle: ElementHandle): string {
+  return `${handle.tabId}.${handle.frameId}.${handle.revision}.${handle.id}`;
+}
+
+export function parseHandle(value: string): ElementHandle {
+  const match = HANDLE_PATTERN.exec(value.trim());
+  if (!match) throw new Error("Invalid element handle. Use a handle string returned by read_page.");
+  return elementHandleSchema.parse({
+    tabId: Number(match[1]),
+    frameId: Number(match[2]),
+    revision: Number(match[3]),
+    id: match[4],
+  });
+}
+
+/** Accepts the documented handle string, or the structured form some models echo back. */
+export const handleInputSchema = z.union([
+  z.string().transform((value, ctx) => {
+    try {
+      return parseHandle(value);
+    } catch (error) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: (error as Error).message });
+      return z.NEVER;
+    }
+  }),
+  elementHandleSchema,
+]);
+
+// Blocks omit kind when it is plain "text"; ranking scores stay local to the content script.
 export const pageBlockSchema = z.object({
-  id: z.string(),
-  kind: z.enum(["heading", "text", "list", "table", "control", "link"]),
+  kind: z.enum(["heading", "list", "table"]).optional(),
   text: z.string(),
-  score: z.number(),
+});
+
+export const selectOptionSchema = z.object({
+  label: z.string(),
+  // Omitted when identical to the label or too long to select by value.
+  value: z.string().optional(),
+  labelTruncated: z.literal(true).optional(),
+  disabled: z.literal(true).optional(),
 });
 
 export const pageElementSchema = z.object({
-  handle: elementHandleSchema,
+  handle: z.string(),
   role: z.string(),
   name: z.string(),
-  state: z.record(z.union([z.string(), z.number(), z.boolean()])),
+  state: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
+  options: z.array(selectOptionSchema).optional(),
 });
 export type PageElement = z.infer<typeof pageElementSchema>;
 
 export const pageSnapshotSchema = z.object({
   tabId: z.number().int(),
   frameId: z.number().int().nonnegative(),
-  revision: z.number().int().nonnegative(),
   url: z.string(),
   title: z.string(),
-  query: z.string(),
   blocks: z.array(pageBlockSchema),
   elements: z.array(pageElementSchema),
   nextCursor: z.string().nullable(),
-  estimatedTokens: z.number().int().nonnegative(),
-  warnings: z.array(z.string()),
+  warnings: z.array(z.string()).optional(),
 });
 export type PageSnapshot = z.infer<typeof pageSnapshotSchema>;
 
@@ -445,12 +504,12 @@ export const contentCommandSchema = z.discriminatedUnion("type", [
     cursor: z.string().nullable().default(null),
     maxTokens: z.number().int().min(100).max(TOKEN_LIMITS.maximumPageResult),
   }),
-  z.object({ type: z.literal("describe"), handle: elementHandleSchema }),
+  z.object({ type: z.literal("describe"), handle: handleInputSchema }),
   z.object({
     type: z.literal("act"),
     operationId: z.string().optional(),
     action: z.enum(["click", "fill", "select", "set_checked", "submit"]),
-    handle: elementHandleSchema,
+    handle: handleInputSchema,
     value: z.union([z.string(), z.boolean()]).optional(),
   }),
   z.object({

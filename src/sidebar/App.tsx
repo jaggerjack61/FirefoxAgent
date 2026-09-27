@@ -1,4 +1,15 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -10,6 +21,8 @@ import {
   type AppSettings,
   type AppSnapshot,
   type ProviderSettings,
+  type RunRecord,
+  type RunStatus,
   type SafetyMode,
   type WorkspaceNote,
 } from "@/shared/schema";
@@ -22,6 +35,15 @@ import { backgroundClient } from "./runtime";
 import { groupThinking, type ThinkingGroup } from "./thinking";
 
 type View = "chat" | "memory" | "usage" | "settings";
+
+const VIEWS: readonly View[] = ["chat", "memory", "usage", "settings"];
+
+const RUN_ACTIVITY: Partial<Record<RunStatus, string>> = {
+  planning: "Planning next step",
+  executing: "Running browser action",
+  awaiting_confirmation: "Waiting for your approval",
+  responding: "Writing response",
+};
 
 interface ActiveStream {
   runId: string;
@@ -45,6 +67,7 @@ const EMPTY_PROVIDER: ProviderSettings = {
   contextWindow: 32_000,
   maxOutputTokens: 2_048,
   maxThinkingTurns: TOKEN_LIMITS.maxTurns,
+  unlimitedTurns: false,
   capabilities: EMPTY_CAPABILITIES,
 };
 
@@ -58,7 +81,10 @@ export function App() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [chatModel, setChatModel] = useState("");
-  const messageEnd = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  // Follow new output only while the reader is already at the bottom.
+  const pinnedToBottom = useRef(true);
 
   const refresh = async () => {
     try {
@@ -80,8 +106,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    messageEnd.current?.scrollIntoView({ block: "end" });
-  }, [snapshot?.messages, snapshot?.modelTurns, stream?.text]);
+    const list = messagesRef.current;
+    if (list && pinnedToBottom.current) list.scrollTop = list.scrollHeight;
+  }, [snapshot?.messages, snapshot?.modelTurns, snapshot?.pendingConfirmation, stream?.text, view]);
+
+  useLayoutEffect(() => {
+    const field = composerRef.current;
+    if (!field) return;
+    field.style.height = "auto";
+    field.style.height = `${Math.min(field.scrollHeight, 160)}px`;
+  }, [input, view]);
 
   const active = Boolean(snapshot?.activeRun);
   const provider = draft.provider ?? EMPTY_PROVIDER;
@@ -113,6 +147,7 @@ export function App() {
     setInput("");
     setStream(null);
     setError("");
+    pinnedToBottom.current = true;
     try {
       const configuredProvider = snapshot?.settings.provider;
       if (configuredProvider) await requestProviderAccess(configuredProvider.baseUrl);
@@ -382,21 +417,37 @@ export function App() {
   };
 
   if (!snapshot) {
-    return <main className="loading">{error || "Connecting to BrowserAgent…"}</main>;
+    return (
+      <main className="loading" role="status">
+        {!error && <span className="spinner" aria-hidden="true" />}
+        <span>{error || "Connecting to BrowserAgent…"}</span>
+      </main>
+    );
   }
 
   return (
     <div className="app">
       <header className="topbar">
         <div className="identity">
+          <span className="brand-mark" aria-hidden="true">
+            <SparkIcon />
+          </span>
           <strong>BrowserAgent</strong>
-          <span className={active ? "status running" : "status"}>
-            {active ? snapshot.activeRun?.status : "ready"}
+          <span className={active ? "status running" : "status"} role="status">
+            <span className="status-dot" aria-hidden="true" />
+            {active ? statusLabel(snapshot.activeRun?.status) : "Ready"}
           </span>
         </div>
         <div className="topbar-actions">
-          <button className="new-chat" disabled={active || busy} onClick={() => void startNewChat()}>
-            New chat
+          <button
+            className="new-chat"
+            aria-label="New chat"
+            title="New chat"
+            disabled={active || busy}
+            onClick={() => void startNewChat()}
+          >
+            <PlusIcon />
+            <span className="label">New chat</span>
           </button>
           <select
             aria-label="Safety mode"
@@ -413,12 +464,27 @@ export function App() {
       </header>
 
       {snapshot.mode === "yolo" && (
-        <div className="yolo-warning">YOLO is active: actions run without confirmation.</div>
+        <div className="yolo-warning" role="alert">
+          <AlertIcon />
+          YOLO is active: actions run without confirmation.
+        </div>
       )}
 
-      <nav className="tabs" aria-label="Sidebar sections">
-        {(["chat", "memory", "usage", "settings"] as const).map((entry) => (
-          <button key={entry} className={view === entry ? "active" : ""} onClick={() => setView(entry)}>
+      <nav
+        className="tabs"
+        aria-label="Sidebar sections"
+        style={{ "--tab-index": VIEWS.indexOf(view) } as CSSProperties}
+      >
+        {VIEWS.map((entry) => (
+          <button
+            key={entry}
+            className={view === entry ? "active" : ""}
+            aria-current={view === entry ? "page" : undefined}
+            onClick={() => {
+              pinnedToBottom.current = true;
+              setView(entry);
+            }}
+          >
             {entry}
           </button>
         ))}
@@ -427,19 +493,31 @@ export function App() {
       {(notice || error) && (
         <div
           className={error ? "banner error" : "banner"}
+          role={error ? "alert" : "status"}
           onClick={() => {
             setNotice("");
             setError("");
           }}
         >
-          {error || notice}
+          {error ? <AlertIcon /> : <CheckIcon />}
+          <span>{error || notice}</span>
+          <span className="banner-dismiss" aria-label="Dismiss">
+            <CloseIcon />
+          </span>
         </div>
       )}
 
       <main className="content">
         {view === "chat" && (
           <section className="chat">
-            <div className="messages">
+            <div
+              className="messages"
+              ref={messagesRef}
+              onScroll={(event) => {
+                const list = event.currentTarget;
+                pinnedToBottom.current = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
+              }}
+            >
               {!snapshot.settings.provider && (
                 <EmptyCard
                   title="Connect a model provider"
@@ -457,7 +535,13 @@ export function App() {
                 />
               )}
               {snapshot.messages.length === 0 && (
-                <p className="muted intro">Ask about the active page, compare tabs, or complete a form.</p>
+                <div className="intro">
+                  <span className="brand-mark large" aria-hidden="true">
+                    <SparkIcon />
+                  </span>
+                  <strong>What should we do?</strong>
+                  <p className="muted">Ask about the active page, compare tabs, or complete a form.</p>
+                </div>
               )}
               {snapshot.messages.map((entry) => {
                 const turns = snapshot.modelTurns.filter((turn) => turn.runId === entry.runId);
@@ -465,19 +549,34 @@ export function App() {
                   entry.role === "user"
                     ? groupThinking(turns, stream?.runId === entry.runId ? stream : null)
                     : [];
+                const run = snapshot.activeRun;
+                const showActivity =
+                  entry.role === "user" &&
+                  run?.id === entry.runId &&
+                  !snapshot.pendingConfirmation &&
+                  !groups.some((group) => group.working);
                 return (
                   <Fragment key={entry.id}>
                     <article className={`message ${entry.role}`}>
-                      <small>{entry.role}</small>
+                      <small className="sr-only">{entry.role}</small>
                       {entry.role === "assistant" ? (
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.content}</ReactMarkdown>
                       ) : (
                         <p>{entry.content}</p>
                       )}
                     </article>
-                    {groups.map((group) => (
-                      <ThinkingDisclosure key={group.key} group={group} />
+                    {groups.map((group, index) => (
+                      <ThinkingDisclosure
+                        // Groups only grow at the end, so position is stable while a streamed
+                        // turn is persisted; keying by it keeps the card from remounting.
+                        key={index}
+                        group={group}
+                        startedAt={
+                          group.working ? (groups[index - 1]?.updatedAt ?? run?.createdAt ?? null) : null
+                        }
+                      />
                     ))}
+                    {showActivity && run && <RunActivity run={run} />}
                   </Fragment>
                 );
               })}
@@ -495,7 +594,6 @@ export function App() {
                   }
                 />
               )}
-              <div ref={messageEnd} />
             </div>
             {snapshot.settings.provider && (
               <div className="model-bar">
@@ -539,10 +637,14 @@ export function App() {
                     void backgroundClient.send({ type: "stop_run", runId: snapshot.activeRun?.id })
                   }
                 >
+                  <StopIcon />
                   Stop
                 </button>
               )}
               <textarea
+                ref={composerRef}
+                rows={1}
+                aria-label="Message"
                 value={input}
                 disabled={active || !snapshot.settings.provider}
                 placeholder={active ? "Run in progress…" : "Ask BrowserAgent…"}
@@ -555,10 +657,13 @@ export function App() {
                 }}
               />
               <button
+                className="send"
+                aria-label="Send"
+                title="Send (Enter)"
                 disabled={active || !input.trim() || !snapshot.settings.provider}
                 onClick={() => void sendMessage()}
               >
-                Send
+                <SendIcon />
               </button>
             </div>
           </section>
@@ -761,15 +866,37 @@ export function App() {
                     type="number"
                     min={1}
                     value={provider.maxThinkingTurns}
+                    disabled={provider.unlimitedTurns}
                     onChange={(event) =>
                       setDraftProvider(setDraft, provider, {
                         maxThinkingTurns: Math.max(1, Math.round(Number(event.target.value) || 1)),
                       })
                     }
                   />
-                  <span className="field-help">Any value — no upper limit</span>
+                  <span className="field-help">
+                    {provider.unlimitedTurns
+                      ? "Ignored while unlimited turns is on"
+                      : "Action, time, and token ceilings scale with this value"}
+                  </span>
                 </label>
               </div>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={provider.unlimitedTurns}
+                  onChange={(event) =>
+                    setDraftProvider(setDraft, provider, { unlimitedTurns: event.target.checked })
+                  }
+                />
+                <span>
+                  Unlimited turns
+                  <span className="field-help">
+                    Runs continue until the model answers or you press Stop. No turn, action, time, or per-run
+                    token ceiling applies, so usage is uncapped. Old tool results are still elided to keep
+                    each request within the context budget.
+                  </span>
+                </span>
+              </label>
               <div className="prompt-budget">
                 <span>Stable prompt</span>
                 <strong>≈{estimateTokens(CORE_INSTRUCTIONS).toLocaleString()} tokens</strong>
@@ -848,32 +975,179 @@ function handleEvent(
   }
 }
 
-function ThinkingDisclosure(props: { group: ThinkingGroup }) {
+function ThinkingDisclosure(props: { group: ThinkingGroup; startedAt: number | null }) {
   const { group } = props;
+  const elapsed = useElapsed(group.working ? props.startedAt : null);
+  const tools = [...new Set(group.tools)];
+  const state = group.working ? "working" : group.failed ? "failed" : "done";
+  const label = group.working ? "Thinking" : group.failed ? "Stopped" : "Thought process";
+  const meta = [
+    group.working && props.startedAt !== null ? formatElapsed(elapsed) : null,
+    !group.working ? plural(group.steps, "step") : null,
+    tools.length > 0 ? plural(tools.length, "tool") : null,
+  ].filter(Boolean);
   return (
-    <details
-      className={`thinking${group.working ? " active" : ""}${group.failed ? " failed" : ""}`}
-      open={group.working}
-    >
+    <details className={`thinking ${state}`} open={group.working}>
       <summary>
-        <span>Thinking</span>
-        <span>{group.working ? "working" : group.failed ? "stopped" : "saved"}</span>
+        <span className="thinking-icon" aria-hidden="true">
+          {group.working ? <span className="spinner" /> : group.failed ? <AlertIcon /> : <SparkIcon />}
+        </span>
+        <span className="thinking-label">{label}</span>
+        {meta.length > 0 && <span className="thinking-meta">{meta.join(" · ")}</span>}
+        <span className="thinking-chevron" aria-hidden="true">
+          <ChevronIcon />
+        </span>
       </summary>
       <div className="thinking-content">
         {group.contents.length > 0 ? (
-          group.contents.map((content, index) => (
-            <ReactMarkdown key={index} remarkPlugins={[remarkGfm]}>
-              {content}
-            </ReactMarkdown>
-          ))
+          <div className={group.working ? "thinking-body streaming" : "thinking-body"}>
+            {group.contents.map((content, index) => (
+              <ReactMarkdown key={index} remarkPlugins={[remarkGfm]}>
+                {content}
+              </ReactMarkdown>
+            ))}
+          </div>
+        ) : group.working ? (
+          <span className="typing" role="status" aria-label="Waiting for the model">
+            <span />
+            <span />
+            <span />
+          </span>
         ) : (
-          <p className="muted">{group.working ? "Working…" : "No visible commentary was emitted."}</p>
+          <p className="muted">No visible commentary was emitted.</p>
         )}
-        {group.tools.length > 0 && (
-          <p className="thinking-tools">Tools: {[...new Set(group.tools)].join(", ")}</p>
+        {tools.length > 0 && (
+          <ul className="thinking-tools" aria-label="Tools used">
+            {tools.map((tool) => (
+              <li key={tool}>{tool}</li>
+            ))}
+          </ul>
         )}
       </div>
     </details>
+  );
+}
+
+function RunActivity(props: { run: RunRecord }) {
+  const elapsed = useElapsed(props.run.createdAt);
+  return (
+    <div className="run-activity" role="status">
+      <span className="spinner" aria-hidden="true" />
+      <span className="shimmer">{RUN_ACTIVITY[props.run.status] ?? "Working"}</span>
+      <span className="thinking-meta">{formatElapsed(elapsed)}</span>
+    </div>
+  );
+}
+
+/** Whole seconds since `since`, ticking once a second; 0 when `since` is null. */
+function useElapsed(since: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (since === null) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  return since === null ? 0 : Math.max(0, Math.floor((now - since) / 1_000));
+}
+
+function formatElapsed(seconds: number): string {
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function statusLabel(status: RunStatus | undefined): string {
+  return status === "awaiting_confirmation" ? "Needs approval" : status ? capitalize(status) : "Working";
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function Icon(props: { children: ReactNode; filled?: boolean }) {
+  return (
+    <svg
+      className="icon"
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill={props.filled ? "currentColor" : "none"}
+      stroke={props.filled ? "none" : "currentColor"}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {props.children}
+    </svg>
+  );
+}
+
+function SparkIcon() {
+  return (
+    <Icon filled>
+      <path d="M12 2.5c.4 4.9 4.6 9.1 9.5 9.5-4.9.4-9.1 4.6-9.5 9.5-.4-4.9-4.6-9.1-9.5-9.5 4.9-.4 9.1-4.6 9.5-9.5Z" />
+    </Icon>
+  );
+}
+
+function SendIcon() {
+  return (
+    <Icon>
+      <path d="M12 19V5M5 12l7-7 7 7" />
+    </Icon>
+  );
+}
+
+function StopIcon() {
+  return (
+    <Icon filled>
+      <rect x="6" y="6" width="12" height="12" rx="2.5" />
+    </Icon>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <Icon>
+      <path d="M12 5v14M5 12h14" />
+    </Icon>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <Icon>
+      <path d="m9 6 6 6-6 6" />
+    </Icon>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <Icon>
+      <path d="m5 12.5 4.5 4.5L19 7.5" />
+    </Icon>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <Icon>
+      <path d="M12 8v5M12 16.5v.01" />
+      <circle cx="12" cy="12" r="9" />
+    </Icon>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <Icon>
+      <path d="M6 6l12 12M18 6 6 18" />
+    </Icon>
   );
 }
 
@@ -932,8 +1206,11 @@ function ConfirmationCard(props: {
 }) {
   const { intent } = props.pending;
   return (
-    <aside className="confirmation">
-      <strong>Confirm {intent.tool}</strong>
+    <aside className="confirmation" role="alertdialog" aria-label={`Confirm ${intent.tool}`}>
+      <strong>
+        <AlertIcon />
+        Confirm <code>{intent.tool}</code>
+      </strong>
       <p>{intent.target ?? intent.classification}</p>
       <pre>{JSON.stringify(intent.redactedArgs, null, 2)}</pre>
       <div>

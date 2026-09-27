@@ -161,4 +161,38 @@ describe("FirefoxGateway content delivery", () => {
     expect(executeScript).toHaveBeenCalledOnce();
     expect(sendMessage).toHaveBeenCalledTimes(2);
   });
+
+  it("waits for a navigation to finish loading and reports where the tab landed", async () => {
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 7, status: "complete", url: "https://old.test/" })
+      .mockResolvedValueOnce({ id: 7, status: "loading", url: "https://new.test/" })
+      .mockResolvedValueOnce({ id: 7, status: "loading", url: "https://new.test/" })
+      .mockResolvedValue({ id: 7, status: "complete", url: "https://new.test/", title: "New page" });
+    const update = vi.fn().mockResolvedValue({ id: 7 });
+    vi.stubGlobal("browser", { tabs: { get, update } });
+    const result = await gateway.execute("navigate", { tabId: 7, url: "https://new.test/" });
+    expect(result.output).toEqual({
+      navigated: true,
+      tabId: 7,
+      url: "https://new.test/",
+      title: "New page",
+      loaded: true,
+    });
+    expect(get).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not hang when a navigation never starts loading, and omits over-long URLs", async () => {
+    const url = `https://example.test/${"a".repeat(300)}`;
+    vi.stubGlobal("browser", {
+      tabs: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "complete", url, title: "Same" }),
+        goBack: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+    const started = Date.now();
+    const result = await gateway.execute("go_back", { tabId: 7 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.output).toEqual({ navigatedBack: true, tabId: 7, title: "Same", loaded: true });
+  });
 });
