@@ -1,115 +1,113 @@
+
+<div align="center">
+
+<img src="static/icons/icon-128.png" alt="BrowserAgent icon" width="80" height="80">
+
 # BrowserAgent
 
-BrowserAgent is a token-first Firefox sidebar agent. It can discuss a page, work across tabs, and complete forms through a user-supplied OpenAI Responses or OpenAI-style Chat Completions endpoint.
+**Bring your AI into the browser.**
 
-The v1 implementation is a scratch rewrite. Every provider request is compiled by one budget-aware context compiler; page content is never attached automatically, the model sees exactly 17 browser tools, and raw page bodies and form values are never retained as memory.
+A Firefox sidebar agent for researching pages, working across tabs, and completing forms through your own AI provider.
 
-## What it does
+![MIT](https://img.shields.io/badge/license-MIT-7c3aed)
+![Firefox 140+](https://img.shields.io/badge/browser-Firefox_140%2B-ff7139)
+![TypeScript + React](https://img.shields.io/badge/built_with-TypeScript_%2B_React-3178c6)
+![Your provider](https://img.shields.io/badge/AI-your_provider-6366f1)
 
-- Streams a persistent sidebar conversation backed by IndexedDB.
-- Keeps visible model progress from every tool turn in permanent, collapsible chat entries.
-- Starts a clean chat by clearing the current conversation and its workspace memory while retaining settings.
-- Controls any permitted HTTP(S) tab through revision-bound semantic element handles.
-- Reads pages through query-ranked, paginated semantic blocks rather than `body.innerText` dumps. Text-only and controls-only modes keep reads focused; the whole JSON result fits the requested estimated token budget.
-- Discovers subframes and reads open shadow DOM. Checks visibility, occlusion, disabled/read-only state, and target identity before interactions.
-- Saves up to 50 named provider/key profiles, including multiple keys for the same endpoint, with independent models, budgets, and capabilities.
-- Supports OpenAI Responses and OpenAI-style Chat Completions wire formats (not native Anthropic or Gemini APIs).
-- Loads an endpoint's available models and tests capabilities instead of guessing from names or URLs.
-- Switches models from a dropdown above the chat input; the choice is saved immediately.
-- Enforces Interactive, Agent, and session-only YOLO action policies outside the model.
-- Displays per-request and per-run token usage, cache usage, compactions, and context-segment estimates.
-- Recovers safely from background restarts by interrupting unfinished runs without replaying actions.
-- Stop cancels hung provider streams, pending confirmations, and in-flight page waits; a mutation already dispatched to the page is marked unverified rather than assumed complete.
-- Consecutive thinking turns collapse into one block, split only when a browser action is actually taken.
+[Features](#features) · [Screenshots](#screenshots) · [Quick start](#quick-start) · [Development](#development)
 
-## Install for development
+<img src="docs/screenshots/chat.jpg" alt="BrowserAgent sidebar with a page research conversation, model selection, and persistent tool progress" width="440">
 
-Requirements: Node.js 20 or newer and Firefox 140 or newer.
+</div>
 
-```bash
-npm install
+---
+
+BrowserAgent keeps conversation, browser actions, and token usage together in a persistent sidebar. Connect an endpoint that supports OpenAI Responses or Chat Completions, select a model, and choose how closely you want to approve browser actions.
+
+## Features
+
+| Feature | What it does |
+|---|---|
+| **Conversation beside your pages** | Stream responses, review collapsible model progress, and return to a conversation saved in IndexedDB. |
+| **Browser work across tabs** | Read selected page content, find controls, navigate, and fill supported forms using a fixed catalog of browser tools. |
+| **Your providers and keys** | Save up to 50 named profiles, load available models, test endpoint capabilities, and switch profiles or models while idle. |
+| **Visible context budgets** | Inspect request and run token totals, cached input, compaction, and estimates for context segments. |
+| **Workspace memory** | Keep bounded notes with source references; start a new chat to clear the conversation and its workspace memory. |
+| **Action policies** | Interactive and Agent modes enforce confirmations outside the model. Stop cancels the current run. |
+
+Page text is read on demand. BrowserAgent has no backend, telemetry, or analytics service; model requests go to the configured provider.
+
+## Screenshots
+
+<table align="center" width="680">
+  <tr>
+    <td width="50%" align="center" valign="top"><img src="docs/screenshots/settings.jpg" alt="BrowserAgent provider settings with endpoint, API key field, and model profile" width="320"><br><sub>Configure a provider and model</sub></td>
+    <td width="50%" align="center" valign="top"><img src="docs/screenshots/usage.jpg" alt="BrowserAgent usage view with token totals and per-request context segments" width="320"><br><sub>Inspect token usage and context budgets</sub></td>
+  </tr>
+</table>
+
+Screenshots show the production sidebar interface with demo conversation and usage data. No live provider credentials are used.
+
+## Quick start
+
+**Requirements:** Node.js 20+ and Firefox 140+.
+
+```sh
+npm ci
 npm run build
 ```
 
-Open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `dist/manifest.json`. The toolbar action opens the BrowserAgent sidebar.
+1. Open `about:debugging#/runtime/this-firefox` in Firefox.
+2. Choose **Load Temporary Add-on** and select `dist/manifest.json`.
+3. Click the toolbar action to open the **BrowserAgent** sidebar.
+4. Open **Settings**, choose Responses or Chat Completions, and enter the endpoint base URL and optional bearer key.
+5. Set the context window and output reserve. Use **Load models** or enter a model ID manually.
+6. Click **Test**, approve access to the provider origin, then **Save**.
+7. Grant optional website access when prompted and start a conversation.
 
-On first use:
+Temporary add-ons are removed when Firefox closes. Create the packaged extension with `npm run package`; artifacts are written to `web-ext-artifacts/`.
 
-1. Open **Settings**.
-2. Choose Responses or Chat Completions, then enter the base URL, optional bearer key, context window, and output reserve.
-3. Click **Load models** and pick a model, or enter its ID manually. You can switch models at any time from the dropdown above the chat input.
-4. Click **Test**. Firefox requests access only to the provider origin and the test records capabilities actually accepted by the endpoint.
-5. Click **Save**.
-6. Grant optional website access when prompted.
+## Providers and profiles
 
-To add another provider or key, choose **Add provider / key**, name the profile, configure it, and **Save**. Use one profile per key—even for the same endpoint. The profile and model dropdowns above chat switch saved configurations while idle. Changes in Settings are drafts until saved; **Remove**, then **Save**, deletes a profile and its key. Existing single-provider settings migrate automatically.
+Choose **Add provider / key** to save another named configuration. Each profile has its own key, model, token budget, and tested capabilities. The provider and model dropdowns above chat switch the selected configuration while idle.
 
-Keys are stored in Firefox local extension storage, **not encrypted**. Only the selected profile's credential is used; there is no automatic rotation or cross-provider fallback. Switching providers also sends that conversation's selected context to the new provider; start a new chat if it should not be shared. Provider requests reject redirects and omit cookies. BrowserAgent has no backend, telemetry, analytics, or price database.
+Settings changes are drafts until **Save**. To delete a profile, choose **Remove**, then **Save**. Only the active profile's credential is used; there is no automatic key rotation or provider fallback.
 
-## Token policy
+API keys are stored in Firefox local extension storage **without encryption**. Switching providers sends the conversation's selected context to the new provider, so start a new chat when you want a separate conversation. Provider requests omit cookies and reject redirects. Native Anthropic and Gemini wire formats are not supported.
 
-Defaults are deliberately conservative:
+## Action modes
 
-| Limit                         |                        Default |
-| ----------------------------- | -----------------------------: |
-| Unknown model context         |                  32,000 tokens |
-| Minimum supported context     |                   8,000 tokens |
-| Output reserve                |                   2,048 tokens |
-| Input soft limit              |                 70% of context |
-| Input hard limit              | context − output reserve − 10% |
-| Total run limit               |                     4× context |
-| Recent conversation           |         6 user/assistant pairs |
-| Workspace notes               |                     800 tokens |
-| Default / maximum page result |             900 / 2,000 tokens |
-| Other tool result             |                     120 tokens |
-| Tab/frame/search list result  |                     600 tokens |
-| Compacted summary             |                     700 tokens |
+| Mode | Behavior |
+|---|---|
+| **Interactive** | Confirms every browser mutation |
+| **Agent** | Confirms submissions, non-navigation controls, tab closure, and unclear effects |
+| **YOLO** | Explicit opt-in for actions without confirmation; lasts only for the current browser session |
 
-Provider-side automatic truncation is not used. Optional segments are omitted in priority order, older Chat Completions history is compacted only at the soft limit, and required context that cannot fit produces a visible budget error.
+All modes still enforce supported URLs, schemas, target checks, privacy filters, and configured budgets. Stop interrupts streams, pending confirmations, and page waits. An already-dispatched mutation can remain unverified; inspect its outcome before retrying.
 
-## Browser tools
+## Browser tools and limits
 
-The complete model-visible catalog is:
+The agent has 17 browser tools: tab listing and navigation, page reading, frame discovery, waiting, history and bookmark search, and supported click/fill/select/check/submit actions. Page results are bounded and paginated, and controls use revision-bound handles so stale targets require a fresh read.
 
-`list_tabs`, `open_tab`, `activate_tab`, `close_tab`, `navigate`, `go_back`, `reload`, `read_page`, `list_frames`, `wait_for`, `search_history`, `search_bookmarks`, `click`, `fill`, `select`, `set_checked`, and `submit`.
+Rich text editors, multi-selects, closed shadow roots, file uploads/downloads, and interactions requiring trusted hardware events are outside the supported tool set. The model cannot execute arbitrary JavaScript.
 
-`search_history` and `search_bookmarks` query local browsing history and saved bookmarks by title/URL text without opening pages. Results are bounded (50 items maximum, 600-token budget) and restricted to HTTP(S) URLs; both tools are read-only and never require confirmation. Using them requires the `history` and `bookmarks` Firefox permissions, which are requested at install.
+See [token policy and browser tools](docs/TECHNICAL.md) for exact defaults, the complete tool catalog, and run-limit behavior. See [ARCHITECTURE.md](ARCHITECTURE.md) for the execution and prompt model.
 
-Use `read_page` with `mode: "controls"` to locate targets or `mode: "text"` for research (`all` is the default). All controls are paginated, not capped at the first 120. Continue with the returned `nextCursor`, keeping query, mode, and frame unchanged. Stale cursors and changed targets require a fresh read, not a guessed handle. Tiny budgets that cannot fit one complete item return an explicit error.
+## Development
 
-Fills use native setters; checkbox changes use native click activation so framework handlers run. Disabled, covered, ambiguous, and read-only targets fail explicitly. Clicks/submissions without a verifiable outcome return `unverified`; inspect before retrying to avoid duplicate effects. Rich/contenteditable editors, multi-selects, closed shadow roots, and sites requiring trusted hardware events remain unsupported.
-
-There is no model-supplied JavaScript, keyboard dispatch, file upload/download, hidden executable tool, or arbitrary extraction alias.
-
-## Safety modes
-
-- **Interactive** confirms every browser mutation.
-- **Agent** confirms submissions, non-navigation controls, tab closure, and unclear effects.
-- **YOLO** executes valid tools without confirmation. It is opt-in, visibly warned, and never persisted across a browser session.
-
-All modes still enforce URL restrictions, schema validation, stale-handle rejection, privacy filtering, token/action/time limits, and target-specific postcondition verification.
-
-Each provider profile sets a maximum number of thinking turns (default 12). The per-run action, time, and token ceilings scale with it. Enabling **Unlimited turns** removes all of these run ceilings, so a run continues until the model answers or you press Stop and its token usage is uncapped. Older tool results are still elided to keep each request within the context budget.
-
-## Development commands
-
-```bash
-npm run typecheck       # strict TypeScript
-npm run lint            # ESLint
-npm run format          # formatting check
-npm test                # offline unit/integration tests
-npm run test:coverage   # coverage and thresholds
-npm run token:budgets   # reviewed stable-prefix counts
-npm run build           # production extension
-npm run lint:addon      # web-ext lint on dist
-npm run package         # exact Firefox ZIP
-npm run test:e2e        # Firefox profile persistence + real-DOM interaction tests
-npm run check           # complete local verification except packaged E2E
-npm audit --omit=dev    # production dependency audit
-```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the execution and prompt model.
+| Command | Purpose |
+|---|---|
+| `npm run typecheck` | Strict TypeScript checks |
+| `npm run lint` | ESLint |
+| `npm run format` | Formatting check |
+| `npm test` | Offline unit and integration tests |
+| `npm run test:coverage` | Coverage and thresholds |
+| `npm run token:budgets` | Stable-prefix token counts |
+| `npm run lint:addon` | Firefox add-on validation |
+| `npm run test:e2e` | Packaged Firefox persistence and DOM interaction tests |
+| `npm run check` | Complete local verification except packaged E2E |
+| `npm run package` | Build the Firefox ZIP |
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE).
